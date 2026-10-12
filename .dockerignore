@@ -1,0 +1,10 @@
+.git
+data/
+config.toml
+state.json
+service-account*.json
+.env
+__pycache__/
+client_secret*.json
+token.json
+pocs/

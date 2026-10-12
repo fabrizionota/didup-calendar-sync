@@ -1,0 +1,16 @@
+# segreti e stato runtime
+config.toml
+data/
+state.json
+*.tmp
+service-account*.json
+.env
+# python
+__pycache__/
+*.pyc
+.venv/
+client_secret*.json
+token.json
+
+# PoC: dump con dati reali
+pocs/out/

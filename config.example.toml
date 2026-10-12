@@ -1,0 +1,101 @@
+# Segreti via env (.env in locale, Environment variables in Portainer): password Argo nelle
+# variabili indicate da password_env di ogni alunno, HA_TOKEN, TELEGRAM_BOT_TOKEN.
+# I path /data/... sono quelli del container; i PoC li cercano anche accanto al config.
+
+[google]
+client_secret_file = "/data/client_secret.json"   # OAuth client "Desktop app"
+token_file = "/data/token.json"                   # da pocs/04_google_auth.py --login (vedi README)
+
+[calendario]
+timezone = "Europe/Rome"
+
+# Impostazioni comuni a tutti gli alunni (ognuno può sovrascriverle)
+[orario]
+giorni = 14            # quanti giorni avanti scaricare l'orario
+durata_ora_min = 60    # usato se Argo dà solo l'ora di inizio
+# Argo di solito NON restituisce gli orari delle ore (campo "ora" vuoto): senza fasce
+# le lezioni non vengono create. Globali qui o per alunno in [alunni.orario.fasce]:
+# [orario.fasce]
+# 1 = "08:00-09:00"
+# 2 = "09:00-10:00"
+# 3 = "10:00-10:55"
+# 4 = "11:05-12:00"
+# 5 = "12:00-13:00"
+# 6 = "13:00-14:00"
+
+[compiti]
+giorni_passati = 0     # considera anche le consegne scadute da N giorni
+
+# Opzionale: colore lezione per materia (colorId Google 1-11)
+# [colori_materie]
+# "MATEMATICA" = 9
+# "ITALIANO" = 10
+
+# Allegati della bacheca (facoltativo), archiviati su Google Drive o su Nextcloud. Struttura
+# decisa da percorso e nome_file (default: <cartella>/<alunno>/<anno>/<MM - Mese>/<data> <nome>).
+# Il link al file finisce nella notifica della circolare e nell'evento di scadenza.
+# - "drive": serve il permesso drive.file nel token (rifai "uv run pocs/04_google_auth.py --login"
+#   e ricopia token.json). Il vecchio "drive = true" vale come archivio = "drive".
+# - "nextcloud": WebDAV con una app password (Impostazioni personali → Sicurezza → Crea nuova
+#   password per l'app) nella variabile NEXTCLOUD_APP_PASSWORD. url e utente anche dalle variabili
+#   NEXTCLOUD_URL e NEXTCLOUD_USER, che vincono sul config. Verifica con pocs/09_nextcloud.py.
+[allegati]
+archivio = ""          # "", "drive" o "nextcloud"
+cartella = "Scuola"
+max_per_giro = 30      # i primi giri recuperano gli allegati già pubblicati, a blocchi
+# Segnaposto: {cartella} {alunno} {anno} {mese} {nome_mese} {giorno} {data} (AAAA-MM-GG) {nome}
+# (nome originale del file); formati Python, es. {mese:02d}. Senza data della circolare le cartelle
+# che la usano vengono saltate e il file tiene il nome originale. Cambiarli non sposta i file già caricati.
+percorso = "{cartella}/{alunno}/{anno}/{mese:02d} - {nome_mese}"
+nome_file = "{data} {nome}"
+
+[allegati.nextcloud]
+url = "https://cloud.esempio.it"   # o variabile NEXTCLOUD_URL
+utente = "nome.utente"             # o variabile NEXTCLOUD_USER
+password_env = "NEXTCLOUD_APP_PASSWORD"
+# Link nella notifica e nell'evento:
+#   "interno"  = <url>/f/<id>, si apre solo dopo il login su Nextcloud
+#   "pubblico" = condivisione in sola lettura apribile senza login da chi ha il link
+link = "interno"
+scadenza_giorni = 0    # solo per "pubblico": dopo N giorni il link non funziona più (0 = mai)
+
+[notifiche]
+# disponibili: voti, bacheca, note, promemoria, assenze, compiti
+tipi = ["voti", "bacheca", "note", "promemoria"]
+
+[notifiche.homeassistant]
+url = "http://homeassistant.local:8123"   # o l'IP interno, es. http://192.168.1.x:8123
+service = "mobile_app_telefono"     # notify.<service>; elenco con: uv run pocs/07_notify.py
+
+# [notifiche.telegram]
+# chat_id = "123456789"
+
+# Un blocco per figlio, ognuno con le sue credenziali Argo: nessun account "principale".
+# Figli con lo stesso account (stessa scuola e username) condividono un solo login.
+#   codice_scuola, username, calendar_id: obbligatori
+#   password_env: variabile d'ambiente con la password (default ARGO_PASSWORD)
+#   profilo: indice mostrato da --list-profiles per quell'account (default 0)
+# Facoltativi, sovrascrivono le sezioni globali solo per questo alunno:
+#   notifiche = [...], materie_ignorate = [...] (es. ["SOSTEGNO"]: ore non messe in calendario)
+#   e le tabelle [alunni.orario], [alunni.compiti], [alunni.colori_materie],
+#   [alunni.allegati] (es. archivio = "" per un solo alunno, sottocartella = "…",
+#   [alunni.allegati.nextcloud] con un altro utente)
+[[alunni]]
+nome = "Primo"
+codice_scuola = "SC12345"
+username = "nome.cognome"
+password_env = "ARGO_PASSWORD_PRIMO"
+profilo = 0
+calendar_id = "xxxxxxxx@group.calendar.google.com"
+
+[[alunni]]
+nome = "Secondo"
+codice_scuola = "SC67890"
+username = "nome.cognome2"
+password_env = "ARGO_PASSWORD_SECONDO"
+calendar_id = "yyyyyyyy@group.calendar.google.com"
+notifiche = ["voti", "bacheca", "note", "promemoria", "compiti"]
+
+[alunni.orario.fasce]          # fasce orarie di questa scuola (se Argo non le dà)
+1 = "08:10-09:05"
+2 = "09:05-10:00"

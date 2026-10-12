@@ -1,0 +1,50 @@
+# didup-calendar-sync con Docker Compose (va bene anche come stack Portainer).
+# Accanto a questo file: .env (da .env.example) e la cartella data/ con config.toml,
+# client_secret.json e token.json, di proprietà di PUID:PGID (default 1000:1000):
+#   sudo chown -R 1000:1000 data && sudo chmod 700 data
+# Avvio: docker compose up -d     Aggiornamento: docker compose pull && docker compose up -d
+services:
+  didup-calendar-sync:
+    # Per aggiornare quando vuoi tu
+    # fissa una versione (es. :2026.10.13) al posto di :latest.
+    image: ghcr.io/fabrizionota/didup-calendar-sync:latest
+    container_name: didup-calendar-sync
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["--loop", "${SYNC_INTERVAL:-1800}"]
+    env_file: .env      # password Argo (password_env di ogni alunno), HA_TOKEN, NEXTCLOUD_*, ...
+    environment:
+      SYNC_INTERVAL: ${SYNC_INTERVAL:-1800}   # usato anche dall'healthcheck
+      TZ: Europe/Rome
+      HOME: /tmp
+    volumes:
+      - ${DATA_DIR:-./data}:/data
+    # Sano se l'ultimo giro è riuscito ed è recente (state.json viene salvato a ogni giro)
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, os, sys, time
+          p = "/data/state.json"
+          limite = 2 * int(os.environ.get("SYNC_INTERVAL", "1800")) + 300
+          ok = os.path.exists(p) and time.time() - os.path.getmtime(p) < limite
+          sys.exit(0 if ok and not json.load(open(p)).get("error") else 1)
+      interval: 5m
+      timeout: 10s
+      retries: 1
+      start_period: 3m
+    # Hardening: nessun privilegio, filesystem in sola lettura tranne /data e /tmp
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
