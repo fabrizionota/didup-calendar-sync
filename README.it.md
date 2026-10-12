@@ -72,8 +72,18 @@ notificati se non li aggiungi.
 
 `[notifiche.homeassistant]`: `url` (va bene l'IP interno, es. `http://192.168.1.x:8123`) e `service`,
 il nome del servizio notify del telefono, es. `mobile_app_<telefono>` (il prefisso `notify.` è
-accettato). Verifica con `uv run pocs/07_notify.py`, che elenca i servizi disponibili se il nome
-non esiste.
+accettato), che riceve tutto. Altri telefoni si aggiungono come destinatari, ognuno con filtri
+facoltativi per tipo e alunno:
+```toml
+[[notifiche.homeassistant.destinatari]]
+service = "mobile_app_altro_telefono"
+tipi = ["voti"]          # solo i voti (tra quelli di [notifiche] tipi)
+alunni = ["Primo"]       # facoltativo: solo questo alunno
+```
+Gli avvisi di sync fallita o ripristinata vanno solo ai destinatari senza filtri. Ogni notifica
+inviata compare nel log (`notifica voti → notify.…: 🎓 Voto – …`, solo il titolo). Verifica con
+`uv run pocs/07_notify.py`, che controlla ogni servizio e, se un nome non esiste, elenca quelli
+disponibili; con `--scrivi` manda una prova a tutti.
 
 Le notifiche di bacheca con un allegato archiviato portano il link: toccando la notifica si
 apre il file su Drive o Nextcloud (non Home Assistant); tenendola premuta compare il pulsante "Apri allegato".

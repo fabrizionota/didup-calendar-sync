@@ -77,8 +77,19 @@ What gets notified is set by `[notifiche] tipi` (or `notifiche = [...]` on a sin
 notified unless you add it.
 
 `[notifiche.homeassistant]`: `url` (the internal IP is fine, e.g. `http://192.168.1.x:8123`) and
-`service`, the phone's notify service, e.g. `mobile_app_<phone>` (a `notify.` prefix is accepted).
-Check with `uv run pocs/07_notify.py`, which lists the available services if the name is wrong.
+`service`, the phone's notify service, e.g. `mobile_app_<phone>` (a `notify.` prefix is accepted),
+which receives everything. More phones are added as recipients, each with optional filters by type
+and pupil:
+```toml
+[[notifiche.homeassistant.destinatari]]
+service = "mobile_app_other_phone"
+tipi = ["voti"]          # grades only (among those in [notifiche] tipi)
+alunni = ["Primo"]       # optional: this pupil only
+```
+Sync failed/recovered alerts go only to recipients without filters. Every notification sent is
+logged (`notifica voti → notify.…: 🎓 Voto – …`, title only). Check with `uv run pocs/07_notify.py`,
+which checks every service and lists the available ones if a name is wrong; `--scrivi` sends a test
+to all of them.
 
 Notice board notifications whose attachment is archived carry its link: tapping the notification
 opens the file in Drive or Nextcloud (not Home Assistant); long-press shows an "Apri allegato" button.
