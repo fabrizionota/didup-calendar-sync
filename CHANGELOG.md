@@ -4,6 +4,12 @@
 
 Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionota/didup-calendar-sync:YYYY.MM.DD`.
 
+## 2026.10.13.1
+- Home Assistant notifications to several phones: `[[notifiche.homeassistant.destinatari]]`, each
+  with optional `tipi` and `alunni` filters; `service` still works and receives everything.
+- Every notification sent is logged (type, recipients, title).
+- PoC 07: checks and tests every recipient.
+
 ## 2026.10.13 — first public release
 - Several pupils, schools and Argo accounts, no main account; global settings overridable per pupil.
 - School timetable on Google Calendar (one calendar per pupil), with configurable time slots,

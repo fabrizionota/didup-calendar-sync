@@ -66,9 +66,15 @@ def load_config(path: Path) -> dict:
     if ha := n.get("homeassistant"):
         ha["token"] = os.environ.get("HA_TOKEN", ha.get("token", ""))
         ha["service"] = ha.get("service", "").removeprefix("notify.")  # accetta anche "notify.xxx"
+        ha["destinatari"] = destinatari_ha(ha)
     if tg := n.get("telegram"):
         tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", tg.get("bot_token", ""))
     n.setdefault("tipi", ["voti", "bacheca", "note", "promemoria"])
+    nomi = {al.get("nome") for al in cfg.get("alunni", [])}
+    for d in (n.get("homeassistant") or {}).get("destinatari", []):
+        if d["alunni"] is not None and (sconosciuti := set(d["alunni"]) - nomi):
+            raise ValueError(f"[[notifiche.homeassistant.destinatari]] {d['service']}: alunni sconosciuti "
+                             f"{sorted(sconosciuti)}")
     c = cfg.setdefault("calendario", {})
     c.setdefault("timezone", "Europe/Rome")
     o = cfg.setdefault("orario", {})
@@ -126,6 +132,31 @@ def archivio_allegati(a: dict, default: str) -> str:
     if v not in ARCHIVI:
         raise ValueError(f"[allegati] archivio = {v!r}: valori ammessi \"drive\", \"nextcloud\" o \"\"")
     return v
+
+
+TIPI_NOTIFICA = ("voti", "bacheca", "note", "promemoria", "assenze", "compiti")
+
+
+def destinatari_ha(ha: dict) -> list[dict]:
+    """Servizi notify di Home Assistant: ``service`` riceve tutto; ogni
+    ``[[notifiche.homeassistant.destinatari]]`` può limitarsi a ``tipi`` e/o ``alunni``."""
+    out = [{"service": ha["service"], "tipi": None, "alunni": None}] if ha.get("service") else []
+    for d in ha.get("destinatari", []):
+        if isinstance(d, dict) and "service" in d and set(d) <= {"service", "tipi", "alunni"} \
+                and d.get("tipi", []) is not None and d.get("alunni", []) is not None:
+            servizio = str(d["service"]).removeprefix("notify.")
+        else:
+            raise ValueError(f"[[notifiche.homeassistant.destinatari]] non valido: {d!r} "
+                             "(chiavi: service, tipi, alunni)")
+        if not servizio:
+            raise ValueError("[[notifiche.homeassistant.destinatari]]: service vuoto")
+        tipi = d.get("tipi")
+        if tipi is not None and (ignoti := set(tipi) - set(TIPI_NOTIFICA)):
+            raise ValueError(f"[[notifiche.homeassistant.destinatari]] {servizio}: tipi sconosciuti "
+                             f"{sorted(ignoti)} (ammessi: {', '.join(TIPI_NOTIFICA)})")
+        out.append({"service": servizio, "tipi": list(tipi) if tipi is not None else None,
+                    "alunni": list(d["alunni"]) if d.get("alunni") is not None else None})
+    return out
 
 
 def account_alunno(al: dict) -> dict:
@@ -1046,8 +1077,15 @@ async def archivia_allegati(cli: "MultiProfiloClient", d, nome: str, acfg: dict,
 # Notifiche                                                                   #
 # --------------------------------------------------------------------------- #
 class Notifier:
-    def __init__(self, cfg: dict, dry_run: bool):
-        self.ha, self.tg, self.dry = cfg.get("homeassistant"), cfg.get("telegram"), dry_run
+    def __init__(self, cfg: dict, dry_run: bool, transport: httpx.BaseTransport | None = None):
+        self.ha, self.tg, self.dry, self.transport = cfg.get("homeassistant"), cfg.get("telegram"), dry_run, transport
+        self.destinatari = (self.ha or {}).get("destinatari") or (destinatari_ha(self.ha) if self.ha else [])
+
+    def servizi(self, kind: str | None, alunno: str | None) -> list[str]:
+        """Servizi HA che ricevono questa notifica. Quelle di sistema (kind None: errori, ripristino)
+        vanno solo ai destinatari senza filtri."""
+        return [d["service"] for d in self.destinatari
+                if (d["tipi"] is None or kind in d["tipi"]) and (d["alunni"] is None or alunno in d["alunni"])]
 
     @staticmethod
     def payload_ha(title: str, message: str, url: str | None) -> dict:
@@ -1057,18 +1095,23 @@ class Notifier:
                          "actions": [{"action": "URI", "title": "Apri allegato", "uri": url}]}
         return p
 
-    def send(self, title: str, message: str, url: str | None = None) -> None:
+    def send(self, title: str, message: str, url: str | None = None,
+             kind: str | None = None, alunno: str | None = None) -> None:
+        servizi = self.servizi(kind, alunno) if self.ha else []
+        a_chi = ", ".join([f"notify.{s}" for s in servizi] + (["telegram"] if self.tg else [])) or "nessuno"
         if self.dry:
-            log.info("NOTIFICA %s | %s%s", title, message.replace("\n", " / "), f" | {url}" if url else "")
+            log.info("NOTIFICA %s → %s | %s | %s%s", kind or "sistema", a_chi, title,
+                     message.replace("\n", " / "), f" | {url}" if url else "")
             return
-        with httpx.Client(timeout=15) as c:
-            if self.ha:
+        log.info("notifica %s → %s: %s", kind or "sistema", a_chi, title)
+        with httpx.Client(timeout=15, transport=self.transport) as c:
+            for servizio in servizi:
                 try:
-                    c.post(f"{self.ha['url'].rstrip('/')}/api/services/notify/{self.ha['service']}",
+                    c.post(f"{self.ha['url'].rstrip('/')}/api/services/notify/{servizio}",
                            headers={"Authorization": f"Bearer {self.ha['token']}"},
                            json=self.payload_ha(title, message, url)).raise_for_status()
                 except httpx.HTTPError as e:
-                    log.error("Notifica HA fallita: %s", e)
+                    log.error("Notifica HA fallita (notify.%s): %s", servizio, e)
             if self.tg:
                 try:
                     c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
@@ -1106,9 +1149,10 @@ def notify_new(snap: Snapshot, who: str, nome: str, state: State, notifier, tipi
                 by_kind.setdefault(n.kind, []).append(n)
         for kind, nuove in by_kind.items():
             for n in nuove[:MAX_PER_TIPO]:
-                notifier.send(n.title, n.message, url=n.url)
+                notifier.send(n.title, n.message, url=n.url, kind=kind, alunno=nome)
             if len(nuove) > MAX_PER_TIPO:
-                notifier.send(f"Argo – {nome}", f"…e altri {len(nuove) - MAX_PER_TIPO} elementi ({kind})")
+                notifier.send(f"Argo – {nome}", f"…e altri {len(nuove) - MAX_PER_TIPO} elementi ({kind})",
+                              kind=kind, alunno=nome)
     state.data["seen"][who] = {k: sorted(set(current.get(k, [])) | set((prev or {}).get(k, [])))
                                for k in set(current) | set(prev or {})}
 

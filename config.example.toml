@@ -65,7 +65,13 @@ tipi = ["voti", "bacheca", "note", "promemoria"]
 
 [notifiche.homeassistant]
 url = "http://homeassistant.local:8123"   # o l'IP interno, es. http://192.168.1.x:8123
-service = "mobile_app_telefono"     # notify.<service>; elenco con: uv run pocs/07_notify.py
+service = "mobile_app_telefono"     # riceve tutto; elenco dei servizi: uv run pocs/07_notify.py
+# Altri destinatari, facoltativi, ognuno con filtri facoltativi (tipi tra quelli di [notifiche] tipi,
+# alunni per nome). Errori e ripristino della sync vanno solo a chi non ha filtri.
+# [[notifiche.homeassistant.destinatari]]
+# service = "mobile_app_altro_telefono"
+# tipi = ["voti"]
+# alunni = ["Primo"]
 
 # [notifiche.telegram]
 # chat_id = "123456789"

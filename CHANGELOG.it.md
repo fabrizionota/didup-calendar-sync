@@ -4,6 +4,12 @@
 
 Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabrizionota/didup-calendar-sync:AAAA.MM.GG`.
 
+## 2026.10.13.1
+- Notifiche Home Assistant a più telefoni: `[[notifiche.homeassistant.destinatari]]`, ognuno con
+  filtri facoltativi `tipi` e `alunni`; `service` resta valido e riceve tutto.
+- Ogni notifica inviata viene scritta nel log (tipo, destinatari, titolo).
+- PoC 07: verifica e prova su tutti i destinatari.
+
 ## 2026.10.13 — prima versione pubblica
 - Più alunni, più scuole e account Argo, senza account principale; impostazioni globali
   sovrascrivibili per alunno.

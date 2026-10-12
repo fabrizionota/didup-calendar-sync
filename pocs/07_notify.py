@@ -6,8 +6,9 @@
 """PoC 07 – notifiche Home Assistant / Telegram.
 
 Default (sola lettura): mostra la configurazione e il messaggio di prova, verifica che HA
-risponda (GET /api/, servizio notify.<service> esistente) e che il bot Telegram sia valido (getMe).
-Con --scrivi: invia davvero la notifica di prova.
+risponda (GET /api/, ogni servizio notify esistente: service e [[destinatari]], con i loro
+filtri) e che il bot Telegram sia valido (getMe). Con --scrivi: invia davvero la notifica di prova a
+tutti i destinatari.
 
   uv run pocs/07_notify.py [-c config.toml] [--solo ha|telegram] [--scrivi]
 """
@@ -19,6 +20,15 @@ import httpx
 from _common import Anon, carica_config, dump, parser, titolo
 
 
+def destinatari(ha: dict) -> list[tuple[str, str]]:
+    """(servizio, filtri) per service e ogni [[notifiche.homeassistant.destinatari]]."""
+    out = [(ha["service"].removeprefix("notify."), "tutto")] if ha.get("service") else []
+    for d in ha.get("destinatari", []):
+        filtri = ", ".join(f"{k}={'/'.join(d[k])}" for k in ("tipi", "alunni") if d.get(k)) or "tutto"
+        out.append((str(d.get("service", "")).removeprefix("notify."), filtri))
+    return out
+
+
 def verifica_ha(c: httpx.Client, ha: dict) -> dict:
     base, hdr = ha["url"].rstrip("/"), {"Authorization": f"Bearer {ha.get('token', '')}"}
     r = c.get(f"{base}/api/", headers=hdr)
@@ -26,10 +36,14 @@ def verifica_ha(c: httpx.Client, ha: dict) -> dict:
     r.raise_for_status()
     servizi = c.get(f"{base}/api/services", headers=hdr).raise_for_status().json()
     notify = sorted(next((d["services"] for d in servizi if d["domain"] == "notify"), {}))
-    trovato = ha["service"] in notify
-    print(f"{'✅' if trovato else '❌'} notify.{ha['service']}"
-          + ("" if trovato else f" non esiste. Disponibili: {', '.join(notify)}"))
-    return {"api": "ok", "servizio_trovato": trovato, "notify": notify}
+    esito = {}
+    for servizio, filtri in destinatari(ha):
+        esito[servizio] = servizio in notify
+        print(f"{'✅' if esito[servizio] else '❌'} notify.{servizio} ({filtri})"
+              + ("" if esito[servizio] else " non esiste"))
+    if not all(esito.values()) or not esito:
+        print(f"servizi notify disponibili: {', '.join(notify)}")
+    return {"api": "ok", "servizi": esito, "notify": notify}
 
 
 def verifica_tg(c: httpx.Client, tg: dict) -> dict:
@@ -90,11 +104,12 @@ def invia_e_verifica(canali: dict, scrivi: bool, titolo_msg: str, messaggio: str
             esito["ha"] = verifica_ha(c, canali["ha"])
             if scrivi:
                 ha = canali["ha"]
-                r = c.post(f"{ha['url'].rstrip('/')}/api/services/notify/{ha['service']}",
-                           headers={"Authorization": f"Bearer {ha['token']}"},
-                           json={"title": titolo_msg, "message": messaggio})
-                print(f"POST notify.{ha['service']}: {r.status_code}")
-                r.raise_for_status()
+                for servizio, _ in destinatari(ha):
+                    r = c.post(f"{ha['url'].rstrip('/')}/api/services/notify/{servizio}",
+                               headers={"Authorization": f"Bearer {ha['token']}"},
+                               json={"title": titolo_msg, "message": messaggio})
+                    print(f"POST notify.{servizio}: {r.status_code}")
+                    r.raise_for_status()
                 esito["ha"]["inviata"] = True
         if "telegram" in canali:
             titolo("Telegram")
