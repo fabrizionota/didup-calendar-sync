@@ -105,11 +105,20 @@ class TestServer(unittest.TestCase):
 
 
 class TestPorta(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from test_snapshot import CONFIG
+        self.tmp = tempfile.TemporaryDirectory()
+        self.config = Path(self.tmp.name) / "config.toml"
+        self.config.write_text(CONFIG)   # niente file del repo: nell'immagine ci sono solo i test
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
     def avvia(self, valore):
         import os
         from unittest import mock
-        argv = ["didup_calendar_sync.py", "-c", str(Path(__file__).resolve().parents[1] / "config.example.toml"),
-                "--list-profiles"]
+        argv = ["didup_calendar_sync.py", "-c", str(self.config), "--list-profiles"]
         with mock.patch.dict(os.environ, {"METRICS_PORT": valore}), mock.patch.object(sys, "argv", argv), \
                 mock.patch.object(m, "run_once", lambda *a: _vuoto()), \
                 mock.patch.object(m, "avvia_server_metriche") as srv, self.assertLogs(m.log, "INFO"):
