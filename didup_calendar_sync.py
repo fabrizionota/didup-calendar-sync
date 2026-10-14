@@ -31,6 +31,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import tomllib
 import xml.etree.ElementTree as ET
@@ -39,6 +40,8 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
+from collections import Counter
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import escape
 
 import httpx
@@ -801,6 +804,9 @@ class Calendar:
             if not self.dry:
                 self.svc.events().delete(calendarId=cal_id, eventId=ev["id"]).execute()
         log.info("[%s] calendario: %d creati, %d aggiornati, %d rimossi", label, c, u, r)
+        if not self.dry:
+            for op, n in (("created", c), ("updated", u), ("deleted", r)):
+                METRICHE.inc("didup_calendar_changes_total", n, alunno=label, op=op)
 
 
 # --------------------------------------------------------------------------- #
@@ -1066,6 +1072,9 @@ async def archivia_allegati(cli: "MultiProfiloClient", d, nome: str, acfg: dict,
         except Exception as e:  # noqa: BLE001 - un allegato non deve fermare la sync
             errori += 1
             log.warning("[%s] allegato '%s' non archiviato: %s", nome, a.nome_file, e)
+    if not drive.dry:
+        METRICHE.inc("didup_attachments_total", caricati, alunno=nome, archivio=tipo or "drive", esito="caricato")
+        METRICHE.inc("didup_attachments_total", errori, alunno=nome, archivio=tipo or "drive", esito="errore")
     if da_fare:
         log.info("[%s] allegati: %d da archiviare, %d caricati su %s, %d link aggiornati, %d errori, "
                  "%d al prossimo giro", nome, len(da_fare), caricati, getattr(drive, "nome", "archivio"),
@@ -1104,6 +1113,7 @@ class Notifier:
                      message.replace("\n", " / "), f" | {url}" if url else "")
             return
         log.info("notifica %s → %s: %s", kind or "sistema", a_chi, title)
+        METRICHE.inc("didup_notifications_total", alunno=alunno or "-", tipo=kind or "sistema")
         with httpx.Client(timeout=15, transport=self.transport) as c:
             for servizio in servizi:
                 try:
@@ -1112,6 +1122,7 @@ class Notifier:
                            json=self.payload_ha(title, message, url)).raise_for_status()
                 except httpx.HTTPError as e:
                     log.error("Notifica HA fallita (notify.%s): %s", servizio, e)
+                    METRICHE.inc("didup_notification_errors_total", servizio=f"notify.{servizio}")
             if self.tg:
                 try:
                     c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
@@ -1119,6 +1130,146 @@ class Notifier:
                                  "text": f"{title}\n{message}" + (f"\n{url}" if url else "")}).raise_for_status()
                 except httpx.HTTPError as e:
                     log.error("Notifica Telegram fallita: %s", e)
+                    METRICHE.inc("didup_notification_errors_total", servizio="telegram")
+
+
+# --------------------------------------------------------------------------- #
+# Monitoraggio: metriche Prometheus, /healthz, push Uptime Kuma                #
+# --------------------------------------------------------------------------- #
+METRICHE_DEF = {
+    "didup_build_info": ("gauge", "Versione di didup-calendar-sync (valore sempre 1)"),
+    "didup_up": ("gauge", "1 se l'ultimo giro è riuscito, 0 se è fallito"),
+    "didup_last_run_timestamp_seconds": ("gauge", "Fine dell'ultimo giro (Unix time)"),
+    "didup_last_success_timestamp_seconds": ("gauge", "Fine dell'ultimo giro riuscito (Unix time)"),
+    "didup_run_duration_seconds": ("gauge", "Durata dell'ultimo giro"),
+    "didup_runs_total": ("counter", "Giri eseguiti, per esito"),
+    "didup_calendar_changes_total": ("counter", "Eventi di calendario creati, aggiornati, rimossi"),
+    "didup_notifications_total": ("counter", "Notifiche inviate, per alunno e tipo"),
+    "didup_notification_errors_total": ("counter", "Invii di notifica falliti, per destinatario"),
+    "didup_attachments_total": ("counter", "Allegati archiviati o falliti, per alunno e archivio"),
+    "didup_items": ("gauge", "Elementi visti nell'ultimo giro, per alunno e tipo (controllo di plausibilità)"),
+    "didup_argo_client_version_info": ("gauge", "argo-client-version usata per l'account (valore sempre 1)"),
+}
+
+
+class Metriche:
+    """Registro minimo di metriche in formato testo Prometheus (solo libreria standard)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._v: dict[str, dict[tuple, float]] = {}
+        self.avvio = time.time()
+        self.intervallo = 1800
+
+    @staticmethod
+    def _chiave(labels: dict) -> tuple:
+        return tuple(sorted((k, str(v)) for k, v in labels.items()))
+
+    def set(self, nome: str, valore: float, **labels) -> None:
+        with self._lock:
+            self._v.setdefault(nome, {})[self._chiave(labels)] = float(valore)
+
+    def inc(self, nome: str, valore: float = 1, **labels) -> None:
+        if not valore:
+            return
+        with self._lock:
+            serie = self._v.setdefault(nome, {})
+            k = self._chiave(labels)
+            serie[k] = serie.get(k, 0.0) + float(valore)
+
+    def get(self, nome: str, **labels) -> float | None:
+        with self._lock:
+            return self._v.get(nome, {}).get(self._chiave(labels))
+
+    def azzera(self, nome: str, **filtro) -> None:
+        """Toglie le serie di ``nome`` con queste etichette (es. vecchia versione di Argo)."""
+        f = {(k, str(v)) for k, v in filtro.items()}
+        with self._lock:
+            serie = self._v.get(nome, {})
+            for k in [k for k in serie if f <= set(k)]:
+                del serie[k]
+
+    @staticmethod
+    def _escape(v: str) -> str:
+        return v.replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
+
+    def testo(self) -> str:
+        righe = []
+        with self._lock:
+            for nome, (tipo, aiuto) in METRICHE_DEF.items():
+                serie = self._v.get(nome)
+                if not serie:
+                    continue
+                righe += [f"# HELP {nome} {aiuto}", f"# TYPE {nome} {tipo}"]
+                for k, v in sorted(serie.items()):
+                    etichette = ",".join(f'{n}="{self._escape(x)}"' for n, x in k)
+                    righe.append(f"{nome}{{{etichette}}} {v:g}" if etichette else f"{nome} {v:g}")
+        return "\n".join(righe) + "\n"
+
+    def salute(self, ora: float | None = None) -> tuple[bool, dict]:
+        """Esito per /healthz: ok se l'ultimo giro è riuscito ed è recente."""
+        ora = ora or time.time()
+        limite = 2 * self.intervallo + 300
+        ultimo, riuscito = self.get("didup_last_run_timestamp_seconds"), self.get("didup_last_success_timestamp_seconds")
+        if ultimo is None:
+            ok = ora - self.avvio < max(900, limite)
+            return ok, {"stato": "avvio" if ok else "nessun giro completato", "da_secondi": int(ora - self.avvio)}
+        ok = self.get("didup_up") == 1 and riuscito is not None and ora - riuscito < limite
+        return ok, {"stato": "ok" if ok else ("ultimo giro fallito" if self.get("didup_up") == 0 else "giro troppo vecchio"),
+                    "ultimo_giro": datetime.fromtimestamp(ultimo).isoformat(timespec="seconds"),
+                    "ultimo_successo": datetime.fromtimestamp(riuscito).isoformat(timespec="seconds") if riuscito else None,
+                    "durata_s": self.get("didup_run_duration_seconds")}
+
+
+METRICHE = Metriche()
+
+
+def avvia_server_metriche(porta: int, host: str = "0.0.0.0") -> ThreadingHTTPServer:
+    """/metrics (Prometheus) e /healthz (200 o 503, JSON) in un thread separato."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path.split("?")[0] == "/metrics":
+                corpo, codice, tipo = METRICHE.testo().encode(), 200, "text/plain; version=0.0.4; charset=utf-8"
+            elif self.path.split("?")[0] == "/healthz":
+                ok, info = METRICHE.salute()
+                corpo, codice, tipo = json.dumps(info).encode(), 200 if ok else 503, "application/json"
+            else:
+                corpo, codice, tipo = b"didup-calendar-sync: /metrics, /healthz\n", 404, "text/plain"
+            self.send_response(codice)
+            self.send_header("Content-Type", tipo)
+            self.send_header("Content-Length", str(len(corpo)))
+            self.end_headers()
+            self.wfile.write(corpo)
+
+        def log_message(self, *a):  # niente log per ogni scrape
+            pass
+
+    srv = ThreadingHTTPServer((host, porta), Handler)
+    threading.Thread(target=srv.serve_forever, name="metriche", daemon=True).start()
+    log.info("monitoraggio: /metrics e /healthz su %s:%d", host, porta)
+    return srv
+
+
+def registra_giro(inizio: float, fine: float, ok: bool) -> None:
+    METRICHE.set("didup_up", 1 if ok else 0)
+    METRICHE.set("didup_last_run_timestamp_seconds", fine)
+    METRICHE.set("didup_run_duration_seconds", round(fine - inizio, 3))
+    METRICHE.inc("didup_runs_total", result="ok" if ok else "error")
+    if ok:
+        METRICHE.set("didup_last_success_timestamp_seconds", fine)
+
+
+def kuma_push(url: str | None, ok: bool, durata: float, messaggio: str,
+              transport: httpx.BaseTransport | None = None) -> None:
+    """Monitor Push di Uptime Kuma: up a fine giro riuscito, down con l'errore. Mai bloccante."""
+    if not url:
+        return
+    try:
+        with httpx.Client(timeout=10, transport=transport) as c:
+            c.get(url, params={"status": "up" if ok else "down", "msg": short(messaggio, 200),
+                               "ping": int(durata * 1000)}).raise_for_status()
+    except httpx.HTTPError as e:
+        log.warning("Push Uptime Kuma fallito: %s", type(e).__name__)  # l'URL contiene il token: non lo logghiamo
 
 
 class State:
@@ -1185,6 +1336,9 @@ async def sync_alunno(cli: "MultiProfiloClient", al: dict, cal: "Calendar",
     log.info("[%s] orario: %d giorni scaricati, %d con lezioni", nome, len(scaricati), len(orario))
     link_allegati = await archivia_allegati(cli, d, nome, acfg, drive, state)
     snap = build_snapshot(d, orario, nome, acfg, oggi, raw=cli.dashboard_raw, link_allegati=link_allegati)
+    visti = Counter(n.kind for n in snap.notifiche) + Counter(c.kind for c in snap.cal if c.kind == "lezione")
+    for tipo in (*TIPI_NOTIFICA, "lezione"):
+        METRICHE.set("didup_items", visti.get(tipo, 0), alunno=nome, tipo=tipo)
 
     limite_compiti = oggi - timedelta(days=acfg["compiti"]["giorni_passati"])
 
@@ -1258,6 +1412,9 @@ async def run_once(cfg: dict, args, state: State, notifier: Notifier) -> None:
             async with client_argo(acc) as cli:
                 log.info("[%s] argo-client-version %s, %d profili",
                          acc["codice_scuola"], cli.versione, len(cli.profili))
+                METRICHE.azzera("didup_argo_client_version_info", scuola=acc["codice_scuola"])
+                METRICHE.set("didup_argo_client_version_info", 1, scuola=acc["codice_scuola"],
+                             versione=str(cli.versione))
                 for al in als:
                     await sync_alunno(cli, al, cal, state, notifier, oggi, archivio(al))
         except Exception as e:  # noqa: BLE001
@@ -1325,8 +1482,20 @@ def main() -> None:
     state = State(args.state)
     notifier = Notifier(cfg["notifiche"], args.dry_run)
     una_tantum = args.dry_run or args.list_profiles or args.debug_orario
+    METRICHE.set("didup_build_info", 1, versione=versione())
+    METRICHE.intervallo = args.loop or int(os.environ.get("SYNC_INTERVAL", "1800"))
+    try:
+        porta = int(os.environ.get("METRICS_PORT") or 0)
+        if not 0 <= porta <= 65535:
+            raise ValueError
+    except ValueError:
+        sys.exit(f"METRICS_PORT non valida: {os.environ.get('METRICS_PORT')!r} (1-65535, 0 = spento)")
+    if porta and not una_tantum:
+        avvia_server_metriche(porta, os.environ.get("METRICS_HOST", "0.0.0.0"))
+    kuma = None if una_tantum else os.environ.get("KUMA_PUSH_URL")
 
     while True:
+        inizio, errore = time.time(), None
         try:
             asyncio.run(run_once(cfg, args, state, notifier))
             if state.data.get("error") and not una_tantum:
@@ -1334,10 +1503,15 @@ def main() -> None:
             state.data["error"] = False
         except Exception as e:  # noqa: BLE001
             log.exception("Sync fallita")
+            errore = f"{type(e).__name__}: {short(str(e), 300)}"
             if not state.data.get("error") and not una_tantum:
-                notifier.send("Argo sync", f"❌ Sync fallita: {type(e).__name__}: {short(str(e), 300)}")
+                notifier.send("Argo sync", f"❌ Sync fallita: {errore}")
             state.data["error"] = True
+        fine = time.time()
         if not una_tantum:
+            registra_giro(inizio, fine, errore is None)
+            kuma_push(kuma, errore is None, fine - inizio,
+                      errore or f"OK {versione()}, {len(cfg['alunni'])} alunni")
             state.save()
         if not args.loop or una_tantum:
             break

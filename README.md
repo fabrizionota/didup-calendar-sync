@@ -66,7 +66,7 @@ Argo di solito **non dà gli orari delle ore** (campo `ora` vuoto), solo il nume
 Password Argo (una variabile per ogni `password_env`), `HA_TOKEN` (token a lunga durata di Home
 Assistant), `TELEGRAM_BOT_TOKEN`, e per gli allegati su Nextcloud `NEXTCLOUD_APP_PASSWORD` (più,
 facoltative, `NEXTCLOUD_URL` e `NEXTCLOUD_USER`): in `.env` per l'uso locale (vedi `.env.example`),
-nelle *Environment variables* dello stack in Portainer.
+nelle *Environment variables* dello stack in Portainer. Per il monitoraggio: `KUMA_PUSH_URL` (segreto), `METRICS_PORT`, `METRICS_BIND`.
 
 #### Notifiche
 Cosa notificare si sceglie con `[notifiche] tipi` (o `notifiche = [...]` nel singolo alunno). Valori:
@@ -232,9 +232,80 @@ disco, nessuna porta in ingresso.
 Una sola istanza per configurazione: due istanze si contendono `token.json` e `state.json` e le
 notifiche partono due volte.
 
+### Monitoraggio
+Con `METRICS_PORT` (porta a scelta, 1-65535; nel compose è `9105` se non la imposti, `0` spegne tutto)
+lo script espone due endpoint HTTP:
+
+- `/metrics`: metriche per **Prometheus**;
+- `/healthz`: `200` se l'ultimo giro è riuscito ed è recente (entro due intervalli), `503` se è
+  fallito o troppo vecchio; nel corpo un JSON con lo stato. All'avvio, prima del primo giro, è `200`.
+
+Nel compose la porta del container segue `METRICS_PORT`; sull'host è pubblicata su `METRICS_BIND`
+(indirizzo:porta, di default `127.0.0.1:9105`, cioè solo in locale). Se Prometheus o Uptime Kuma
+sono su un altro host usa `METRICS_BIND=0.0.0.0:9105`. Se sono container sullo stesso host, aggiungi
+`deploy/compose.monitoraggio.yml` (in Portainer: *Additional paths*): collega il servizio alle reti Docker di Prometheus e Kuma, configurabili con `PROMETHEUS_NETWORK` e
+`KUMA_NETWORK` (default `monitoring`; i nomi con `docker network ls`). La destinazione diventa
+`didup-calendar-sync:<METRICS_PORT>`.
+```bash
+docker compose -f compose.yml -f compose.monitoraggio.yml up -d
+``` Negli esempi sotto la porta è 9105.
+
+| Metrica | Significato |
+| --- | --- |
+| `didup_up` | 1 se l'ultimo giro è riuscito |
+| `didup_last_success_timestamp_seconds`, `didup_last_run_timestamp_seconds` | fine dell'ultimo giro riuscito e dell'ultimo giro |
+| `didup_run_duration_seconds` | durata dell'ultimo giro |
+| `didup_runs_total{result}` | giri `ok` / `error` |
+| `didup_calendar_changes_total{alunno,op}` | eventi `created` / `updated` / `deleted` |
+| `didup_notifications_total{alunno,tipo}` | notifiche inviate |
+| `didup_notification_errors_total{servizio}` | invii falliti per destinatario |
+| `didup_attachments_total{alunno,archivio,esito}` | allegati `caricato` / `errore` |
+| `didup_items{alunno,tipo}` | voti, bacheca, note, promemoria, assenze, compiti, lezioni visti nell'ultimo giro |
+| `didup_argo_client_version_info{scuola,versione}` | versione dell'app Argo usata |
+| `didup_build_info{versione}` | versione di didup-calendar-sync |
+
+Le etichette contengono solo il nome dell'alunno, mai voti o testi.
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: didup-calendar-sync
+    static_configs:
+      - targets: ["host-docker:9105"]
+```
+Regole di allerta d'esempio:
+```yaml
+groups:
+  - name: didup-calendar-sync
+    rules:
+      - alert: DidupSyncFallita
+        expr: didup_up == 0
+        for: 1h
+      - alert: DidupNessunGiroRiuscito
+        expr: time() - didup_last_success_timestamp_seconds > 7200
+      - alert: DidupLezioniSparite        # Argo potrebbe aver cambiato qualcosa (o sono vacanze)
+        expr: max_over_time(didup_items{tipo="lezione"}[3d]) == 0
+      - alert: DidupVersioneArgoCambiata  # più versioni viste nelle ultime 24 ore
+        expr: count by (scuola) (last_over_time(didup_argo_client_version_info[1d])) > 1
+```
+
+**Uptime Kuma**, due modi (anche insieme):
+
+- **Push** (consigliato): crea un monitor *Push* con intervallo poco più lungo di `SYNC_INTERVAL`
+  (es. 35 minuti) e metti il suo URL in `KUMA_PUSH_URL` (va bene anche con `?status=up&msg=OK&ping=`
+  copiato da Kuma). A fine giro lo script invia `up` con durata e versione, o `down` con l'errore;
+  se non arriva nulla (container fermo o bloccato) Kuma avvisa da sé. L'URL contiene un token: tienilo
+  nel `.env` o nelle variabili dello stack.
+- **HTTP**: monitor *HTTP(s)* su `http://host-docker:9105/healthz`: rosso con `503` o se il container
+  non risponde.
+
 ### Rilasci
 GitHub Actions esegue i test a ogni push e pull request. Un push su `main` pubblica l'immagine
 `edge`; un tag `vAAAA.MM.GG` pubblica `AAAA.MM.GG` e `latest`. La versione compare nel log all'avvio.
+
+Per una copia ospitata su Gitea o Forgejo c'è `.gitea/workflows/ci.yml`: stessi test e immagine nel
+registry dell'istanza (`edge`, `sha-<commit>` a ogni push, versione e `latest` sui tag), con il
+secret `REGISTRY_TOKEN`.
 
 ### Test
 ```bash
@@ -515,9 +586,59 @@ no inbound port.
 One instance per configuration: two instances fight over `token.json` and `state.json` and
 notifications are sent twice.
 
+### Monitoring
+With `METRICS_PORT` (any port 1-65535; the compose uses `9105` if unset, `0` turns it all off) the
+script exposes two HTTP endpoints:
+
+- `/metrics`: **Prometheus** metrics;
+- `/healthz`: `200` if the last run succeeded and is recent (within two intervals), `503` if it
+  failed or is too old; the body is a JSON status. At startup, before the first run, it is `200`.
+
+In the compose the container port follows `METRICS_PORT`; on the host it is published on
+`METRICS_BIND` (address:port, default `127.0.0.1:9105`, i.e. local only). If Prometheus or Uptime
+Kuma run on another host use `METRICS_BIND=0.0.0.0:9105`. If they are containers on the same host,
+add `deploy/compose.monitoraggio.yml` (in Portainer: *Additional paths*): it attaches the service to the Prometheus and Kuma Docker networks, set with `PROMETHEUS_NETWORK` and
+`KUMA_NETWORK` (default `monitoring`; names from `docker network ls`). The target becomes
+`didup-calendar-sync:<METRICS_PORT>`.
+```bash
+docker compose -f compose.yml -f compose.monitoraggio.yml up -d
+``` The examples below use port 9105.
+
+| Metric | Meaning |
+| --- | --- |
+| `didup_up` | 1 if the last run succeeded |
+| `didup_last_success_timestamp_seconds`, `didup_last_run_timestamp_seconds` | end of the last successful run and of the last run |
+| `didup_run_duration_seconds` | duration of the last run |
+| `didup_runs_total{result}` | `ok` / `error` runs |
+| `didup_calendar_changes_total{alunno,op}` | `created` / `updated` / `deleted` events |
+| `didup_notifications_total{alunno,tipo}` | notifications sent |
+| `didup_notification_errors_total{servizio}` | failed sends per recipient |
+| `didup_attachments_total{alunno,archivio,esito}` | attachments `caricato` (uploaded) / `errore` |
+| `didup_items{alunno,tipo}` | grades, notices, notes, reminders, absences, homework, lessons seen in the last run |
+| `didup_argo_client_version_info{scuola,versione}` | Argo app version in use |
+| `didup_build_info{versione}` | didup-calendar-sync version |
+
+Labels only carry the pupil's name, never grades or texts. Prometheus scrape config and example
+alert rules (failed sync, no successful run for 2 hours, lessons gone, Argo version changed) are in
+the Italian section above: the YAML is the same.
+
+**Uptime Kuma**, two ways (also together):
+
+- **Push** (recommended): create a *Push* monitor with an interval slightly longer than
+  `SYNC_INTERVAL` (e.g. 35 minutes) and put its URL in `KUMA_PUSH_URL` (the `?status=up&msg=OK&ping=`
+  form copied from Kuma is fine). After each run the script sends `up` with duration and version, or
+  `down` with the error; if nothing arrives (container stopped or stuck) Kuma alerts by itself. The
+  URL contains a token: keep it in `.env` or the stack variables.
+- **HTTP**: an *HTTP(s)* monitor on `http://docker-host:9105/healthz`: red on `503` or when the
+  container doesn't answer.
+
 ### Releases
 GitHub Actions runs the tests on every push and pull request. A push to `main` publishes the `edge`
 image; a `vYYYY.MM.DD` tag publishes `YYYY.MM.DD` and `latest`. The version is logged at startup.
+
+For a copy hosted on Gitea or Forgejo there is `.gitea/workflows/ci.yml`: same tests and an image in
+the instance registry (`edge`, `sha-<commit>` on every push, version and `latest` on tags), with the
+`REGISTRY_TOKEN` secret.
 
 ### Tests
 ```bash

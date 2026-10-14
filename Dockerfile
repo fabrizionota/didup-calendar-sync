@@ -18,5 +18,7 @@ LABEL org.opencontainers.image.version=$VERSION \
       org.opencontainers.image.description="Argo didUP Famiglia -> Google Calendar + notifiche (non ufficiale)" \
       org.opencontainers.image.licenses="MIT"
 VOLUME /data
+# /metrics e /healthz, solo se METRICS_PORT è impostata (9105 è il valore suggerito, non obbligatorio)
+EXPOSE 9105
 ENTRYPOINT ["python", "didup_calendar_sync.py", "-c", "/data/config.toml"]
 CMD ["--loop", "1800"]

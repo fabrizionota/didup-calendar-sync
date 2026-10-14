@@ -8,6 +8,15 @@
 
 Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabrizionota/didup-calendar-sync:AAAA.MM.GG`.
 
+### 2026.10.14
+- Monitoraggio: endpoint `/metrics` per Prometheus (giri, durata, eventi, notifiche, allegati,
+  elementi visti per tipo, versione dell'app Argo) e `/healthz` (200/503), attivi con `METRICS_PORT`
+  (9105 nel compose, pubblicata solo su localhost: `METRICS_BIND`). Solo libreria standard.
+- Uptime Kuma: push a fine giro (`up` con durata, `down` con l'errore) con `KUMA_PUSH_URL`.
+- `deploy/compose.monitoraggio.yml`: reti Docker di Prometheus e Kuma configurabili
+  (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
+- Regole Prometheus d'esempio nel README, compreso il controllo di plausibilità sulle lezioni.
+
 ### 2026.10.13.1
 - Notifiche Home Assistant a più telefoni: `[[notifiche.homeassistant.destinatari]]`, ognuno con
   filtri facoltativi `tipi` e `alunni`; `service` resta valido e riceve tutto.
@@ -35,6 +44,16 @@ Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabri
 ## 🇬🇧 English
 
 Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionota/didup-calendar-sync:YYYY.MM.DD`.
+
+### 2026.10.14
+- Monitoring: `/metrics` endpoint for Prometheus (runs, duration, events, notifications,
+  attachments, items seen per type, Argo app version) and `/healthz` (200/503), enabled by
+  `METRICS_PORT` (9105 in the compose, published on localhost only: `METRICS_BIND`). Standard
+  library only.
+- Uptime Kuma: push after each run (`up` with duration, `down` with the error) via `KUMA_PUSH_URL`.
+- `deploy/compose.monitoraggio.yml`: configurable Prometheus and Kuma Docker networks
+  (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
+- Example Prometheus rules in the README, including the plausibility check on lessons.
 
 ### 2026.10.13.1
 - Home Assistant notifications to several phones: `[[notifiche.homeassistant.destinatari]]`, each

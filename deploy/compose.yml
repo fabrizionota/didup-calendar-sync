@@ -15,8 +15,14 @@ services:
     env_file: .env      # password Argo (password_env di ogni alunno), HA_TOKEN, NEXTCLOUD_*, ...
     environment:
       SYNC_INTERVAL: ${SYNC_INTERVAL:-1800}   # usato anche dall'healthcheck
+      METRICS_PORT: ${METRICS_PORT:-9105}     # /metrics (Prometheus) e /healthz; 0 = spento
       TZ: Europe/Rome
       HOME: /tmp
+    # Porta delle metriche: METRICS_PORT nel container, METRICS_BIND (indirizzo:porta) sull'host, di
+    # default solo localhost. Per Prometheus/Uptime Kuma su un altro host: METRICS_BIND=0.0.0.0:9105. Se girano come container sullo stesso host, meglio
+    # usare anche compose.monitoraggio.yml, che toglie "ports" e collega le loro reti Docker.
+    ports:
+      - "${METRICS_BIND:-127.0.0.1:9105}:${METRICS_PORT:-9105}"
     volumes:
       - ${DATA_DIR:-./data}:/data
     # Sano se l'ultimo giro è riuscito ed è recente (state.json viene salvato a ogni giro)
