@@ -289,6 +289,14 @@ groups:
         expr: count by (scuola) (last_over_time(didup_argo_client_version_info[1d])) > 1
 ```
 
+Porta e URL di push si possono mettere anche nel `config.toml`, se non puoi aggiungere variabili al
+container (le variabili, se presenti, vincono):
+```toml
+[monitoraggio]
+porta = 9105
+kuma_push_url = "http://uptime-kuma:3001/api/push/XXXX?status=up&msg=OK&ping="
+```
+
 **Uptime Kuma**, due modi (anche insieme):
 
 - **Push** (consigliato): crea un monitor *Push* con intervallo poco più lungo di `SYNC_INTERVAL`
@@ -621,6 +629,9 @@ docker compose -f compose.yml -f compose.monitoraggio.yml up -d
 Labels only carry the pupil's name, never grades or texts. Prometheus scrape config and example
 alert rules (failed sync, no successful run for 2 hours, lessons gone, Argo version changed) are in
 the Italian section above: the YAML is the same.
+
+Port and push URL can also go in `config.toml` under `[monitoraggio]` (`porta`, `kuma_push_url`) if
+you can't add variables to the container; variables, when set, win.
 
 **Uptime Kuma**, two ways (also together):
 

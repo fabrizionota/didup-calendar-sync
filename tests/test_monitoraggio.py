@@ -131,12 +131,61 @@ class TestPorta(unittest.TestCase):
                 self.avvia(v)
             self.assertIn("METRICS_PORT non valida", str(cm.exception))
 
+    def avvia_loop(self, env, extra=""):
+        import os
+        from unittest import mock
+        if extra:
+            self.config.write_text(self.config.read_text().replace("[orario]", extra + "\n[orario]", 1))
+        argv = ["didup_calendar_sync.py", "-c", str(self.config), "--state", str(self.config.parent / "s.json")]
+        spinte = []
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(m, "run_once", lambda *a: _vuoto()), \
+                mock.patch.object(m, "avvia_server_metriche") as srv, \
+                mock.patch.object(m, "kuma_push", lambda url, *a, **k: spinte.append(url)), \
+                self.assertLogs(m.log, "INFO"):
+            m.main()
+        return srv, spinte
+
+    def test_config_usato_se_manca_la_variabile(self):
+        srv, spinte = self.avvia_loop({}, '[monitoraggio]\nporta = 9300\nkuma_push_url = "http://k/api/push/C"')
+        self.assertEqual(srv.call_args.args[0], 9300)
+        self.assertEqual(spinte, ["http://k/api/push/C"])
+
+    def test_variabili_vincono_sul_config(self):
+        srv, spinte = self.avvia_loop({"METRICS_PORT": "9400", "KUMA_PUSH_URL": "http://k/api/push/E"},
+                                      '[monitoraggio]\nporta = 9300\nkuma_push_url = "http://k/api/push/C"')
+        self.assertEqual(srv.call_args.args[0], 9400)
+        self.assertEqual(spinte, ["http://k/api/push/E"])
+
+    def test_variabile_vuota_usa_il_config(self):   # stack con KUMA_PUSH_URL: ${KUMA_PUSH_URL:-}
+        _, spinte = self.avvia_loop({"KUMA_PUSH_URL": ""}, '[monitoraggio]\nkuma_push_url = "http://k/api/push/C"')
+        self.assertEqual(spinte, ["http://k/api/push/C"])
+
     def test_porta_valida_ma_una_tantum_non_avvia(self):
         self.assertFalse(self.avvia("9200").called)   # --list-profiles: niente server
 
 
 async def _vuoto():
     return None
+
+
+class TestConfigMonitoraggio(unittest.TestCase):
+    def carica(self, extra, env=None):
+        from test_snapshot import CONFIG, carica
+        return carica(CONFIG.replace("[orario]", extra + "\n[orario]", 1), env)
+
+    def test_default_e_valori(self):
+        self.assertEqual(self.carica("")["monitoraggio"], {})
+        c = self.carica('[monitoraggio]\nporta = 9200\nkuma_push_url = "http://k/api/push/T"')
+        self.assertEqual(c["monitoraggio"], {"porta": 9200, "kuma_push_url": "http://k/api/push/T"})
+
+    def test_validazione(self):
+        with self.assertRaisesRegex(ValueError, "porta"):
+            self.carica('[monitoraggio]\nporta = "9105"')
+        with self.assertRaisesRegex(ValueError, "porta"):
+            self.carica("[monitoraggio]\nporta = 70000")
+        with self.assertRaisesRegex(ValueError, "chiavi sconosciute"):
+            self.carica('[monitoraggio]\nkuma = "x"')
 
 
 class TestKuma(unittest.TestCase):

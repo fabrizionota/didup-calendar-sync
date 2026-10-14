@@ -86,6 +86,12 @@ def load_config(path: Path) -> dict:
     o.setdefault("fasce", {})
     cfg.setdefault("compiti", {}).setdefault("giorni_passati", 0)
     cfg.setdefault("colori_materie", {})
+    mon = cfg.setdefault("monitoraggio", {})  # le variabili d'ambiente vincono (METRICS_PORT, KUMA_PUSH_URL)
+    if set(mon) - {"porta", "kuma_push_url"}:
+        raise ValueError(f"[monitoraggio]: chiavi sconosciute {sorted(set(mon) - {'porta', 'kuma_push_url'})} "
+                         "(ammesse: porta, kuma_push_url)")
+    if "porta" in mon and (not isinstance(mon["porta"], int) or not 0 <= mon["porta"] <= 65535):
+        raise ValueError(f"[monitoraggio] porta = {mon['porta']!r}: intero 1-65535, 0 = spento")
     al_cfg = cfg.setdefault("allegati", {})
     al_cfg["archivio"] = archivio_allegati(al_cfg, "")  # "drive", "nextcloud" o "" (disattivo)
     al_cfg["drive"] = al_cfg["archivio"] == "drive"
@@ -1484,15 +1490,19 @@ def main() -> None:
     una_tantum = args.dry_run or args.list_profiles or args.debug_orario
     METRICHE.set("didup_build_info", 1, versione=versione())
     METRICHE.intervallo = args.loop or int(os.environ.get("SYNC_INTERVAL", "1800"))
+    mon = cfg["monitoraggio"]
     try:
-        porta = int(os.environ.get("METRICS_PORT") or 0)
+        porta = int(os.environ.get("METRICS_PORT") or mon.get("porta") or 0)
         if not 0 <= porta <= 65535:
             raise ValueError
     except ValueError:
         sys.exit(f"METRICS_PORT non valida: {os.environ.get('METRICS_PORT')!r} (1-65535, 0 = spento)")
     if porta and not una_tantum:
         avvia_server_metriche(porta, os.environ.get("METRICS_HOST", "0.0.0.0"))
-    kuma = None if una_tantum else os.environ.get("KUMA_PUSH_URL")
+    kuma = None if una_tantum else (os.environ.get("KUMA_PUSH_URL") or mon.get("kuma_push_url") or None)
+    if kuma:
+        log.info("monitoraggio: push Uptime Kuma attivo (%s)",
+                 "variabile KUMA_PUSH_URL" if os.environ.get("KUMA_PUSH_URL") else "config [monitoraggio]")
 
     while True:
         inizio, errore = time.time(), None
