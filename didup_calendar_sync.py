@@ -1484,7 +1484,12 @@ def main() -> None:
     una_tantum = args.dry_run or args.list_profiles or args.debug_orario
     METRICHE.set("didup_build_info", 1, versione=versione())
     METRICHE.intervallo = args.loop or int(os.environ.get("SYNC_INTERVAL", "1800"))
-    porta = int(os.environ.get("METRICS_PORT") or 0)
+    try:
+        porta = int(os.environ.get("METRICS_PORT") or 0)
+        if not 0 <= porta <= 65535:
+            raise ValueError
+    except ValueError:
+        sys.exit(f"METRICS_PORT non valida: {os.environ.get('METRICS_PORT')!r} (1-65535, 0 = spento)")
     if porta and not una_tantum:
         avvia_server_metriche(porta, os.environ.get("METRICS_HOST", "0.0.0.0"))
     kuma = None if una_tantum else os.environ.get("KUMA_PUSH_URL")

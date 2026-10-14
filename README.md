@@ -233,16 +233,18 @@ Una sola istanza per configurazione: due istanze si contendono `token.json` e `s
 notifiche partono due volte.
 
 ### Monitoraggio
-Con `METRICS_PORT` (nel compose è già `9105`) lo script espone due endpoint HTTP:
+Con `METRICS_PORT` (porta a scelta, 1-65535; nel compose è `9105` se non la imposti, `0` spegne tutto)
+lo script espone due endpoint HTTP:
 
 - `/metrics`: metriche per **Prometheus**;
 - `/healthz`: `200` se l'ultimo giro è riuscito ed è recente (entro due intervalli), `503` se è
   fallito o troppo vecchio; nel corpo un JSON con lo stato. All'avvio, prima del primo giro, è `200`.
 
-La porta è pubblicata sull'host solo su `127.0.0.1` (`METRICS_BIND`). Se Prometheus o Uptime Kuma
+Nel compose la porta del container segue `METRICS_PORT`; sull'host è pubblicata su `METRICS_BIND`
+(indirizzo:porta, di default `127.0.0.1:9105`, cioè solo in locale). Se Prometheus o Uptime Kuma
 sono su un altro host usa `METRICS_BIND=0.0.0.0:9105`; se sono container sullo stesso host, togli
 `ports:` e collega il servizio alla loro rete Docker (`networks:` con `external: true`), poi usa
-`didup-calendar-sync:9105` come destinazione.
+`didup-calendar-sync:<METRICS_PORT>` come destinazione. Negli esempi sotto la porta è 9105.
 
 | Metrica | Significato |
 | --- | --- |
@@ -581,16 +583,18 @@ One instance per configuration: two instances fight over `token.json` and `state
 notifications are sent twice.
 
 ### Monitoring
-With `METRICS_PORT` (already `9105` in the compose) the script exposes two HTTP endpoints:
+With `METRICS_PORT` (any port 1-65535; the compose uses `9105` if unset, `0` turns it all off) the
+script exposes two HTTP endpoints:
 
 - `/metrics`: **Prometheus** metrics;
 - `/healthz`: `200` if the last run succeeded and is recent (within two intervals), `503` if it
   failed or is too old; the body is a JSON status. At startup, before the first run, it is `200`.
 
-The port is published on the host only on `127.0.0.1` (`METRICS_BIND`). If Prometheus or Uptime
+In the compose the container port follows `METRICS_PORT`; on the host it is published on
+`METRICS_BIND` (address:port, default `127.0.0.1:9105`, i.e. local only). If Prometheus or Uptime
 Kuma run on another host use `METRICS_BIND=0.0.0.0:9105`; if they are containers on the same host,
 remove `ports:` and attach the service to their Docker network (`networks:` with `external: true`),
-then target `didup-calendar-sync:9105`.
+then target `didup-calendar-sync:<METRICS_PORT>`. The examples below use port 9105.
 
 | Metric | Meaning |
 | --- | --- |

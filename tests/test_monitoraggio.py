@@ -104,6 +104,32 @@ class TestServer(unittest.TestCase):
             srv.server_close()
 
 
+class TestPorta(unittest.TestCase):
+    def avvia(self, valore):
+        import os
+        from unittest import mock
+        argv = ["didup_calendar_sync.py", "-c", str(Path(__file__).resolve().parents[1] / "config.example.toml"),
+                "--list-profiles"]
+        with mock.patch.dict(os.environ, {"METRICS_PORT": valore}), mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(m, "run_once", lambda *a: _vuoto()), \
+                mock.patch.object(m, "avvia_server_metriche") as srv, self.assertLogs(m.log, "INFO"):
+            m.main()
+        return srv
+
+    def test_porta_non_valida(self):
+        for v in ("abc", "70000", "-1"):
+            with self.assertRaises(SystemExit) as cm:
+                self.avvia(v)
+            self.assertIn("METRICS_PORT non valida", str(cm.exception))
+
+    def test_porta_valida_ma_una_tantum_non_avvia(self):
+        self.assertFalse(self.avvia("9200").called)   # --list-profiles: niente server
+
+
+async def _vuoto():
+    return None
+
+
 class TestKuma(unittest.TestCase):
     def setUp(self):
         self.chiamate = []
