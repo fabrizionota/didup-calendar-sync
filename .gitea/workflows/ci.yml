@@ -4,6 +4,8 @@ name: ci
 # Test a ogni push; immagine nel registry della stessa istanza Gitea:
 #   tag vAAAA.MM.GG → :AAAA.MM.GG e :latest     main → :edge     ogni push → :sha-<7 caratteri>
 # Serve il secret REGISTRY_TOKEN (token con write:package dell'utente che fa il push).
+# Facoltativa la variabile REGISTRY (es. git.example.org): se il runner vede Gitea con un indirizzo
+# interno, gitea.server_url non è il nome pubblico del registry.
 on:
   push:
     branches: ["**"]
@@ -21,7 +23,8 @@ jobs:
       - name: Versione e tag
         id: v
         run: |
-          REGISTRY="$(echo "${{ gitea.server_url }}" | sed -E 's#^https?://##; s#/$##')"
+          REGISTRY="${{ vars.REGISTRY }}"
+          [ -n "$REGISTRY" ] || REGISTRY="$(echo "${{ gitea.server_url }}" | sed -E 's#^https?://##; s#/$##')"
           IMAGE="$REGISTRY/$(echo "${{ gitea.repository }}" | tr '[:upper:]' '[:lower:]')"
           SHA="${GITHUB_SHA::7}"
           TAGS="$IMAGE:sha-$SHA"
@@ -41,7 +44,7 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          if [ -z "$REGISTRY_TOKEN" ]; then echo "REGISTRY_TOKEN non impostato: immagine non pubblicata"; exit 0; fi
+          if [ -z "$REGISTRY_TOKEN" ]; then echo "::error::secret REGISTRY_TOKEN non impostato: immagine non pubblicata"; exit 1; fi
           echo "$REGISTRY_TOKEN" | docker login "${{ steps.v.outputs.registry }}" -u "${{ gitea.actor }}" --password-stdin
           PRIMO=""
           for t in ${{ steps.v.outputs.tags }}; do
