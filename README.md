@@ -297,6 +297,10 @@ groups:
 GitHub Actions esegue i test a ogni push e pull request. Un push su `main` pubblica l'immagine
 `edge`; un tag `vAAAA.MM.GG` pubblica `AAAA.MM.GG` e `latest`. La versione compare nel log all'avvio.
 
+Per una copia ospitata su Gitea o Forgejo c'è `.gitea/workflows/ci.yml`: stessi test e immagine nel
+registry dell'istanza (`edge`, `sha-<commit>` a ogni push, versione e `latest` sui tag), con il
+secret `REGISTRY_TOKEN`.
+
 ### Test
 ```bash
 uv run --no-project --python 3.12 --with-requirements requirements.txt \
@@ -619,6 +623,10 @@ the Italian section above: the YAML is the same.
 ### Releases
 GitHub Actions runs the tests on every push and pull request. A push to `main` publishes the `edge`
 image; a `vYYYY.MM.DD` tag publishes `YYYY.MM.DD` and `latest`. The version is logged at startup.
+
+For a copy hosted on Gitea or Forgejo there is `.gitea/workflows/ci.yml`: same tests and an image in
+the instance registry (`edge`, `sha-<commit>` on every push, version and `latest` on tags), with the
+`REGISTRY_TOKEN` secret.
 
 ### Tests
 ```bash

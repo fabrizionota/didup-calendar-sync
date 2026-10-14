@@ -1,0 +1,56 @@
+name: ci
+
+# CI per una copia del repository ospitata su Gitea/Forgejo (GitHub usa .github/workflows).
+# Test a ogni push; immagine nel registry della stessa istanza Gitea:
+#   tag vAAAA.MM.GG → :AAAA.MM.GG e :latest     main → :edge     ogni push → :sha-<7 caratteri>
+# Serve il secret REGISTRY_TOKEN (token con write:package dell'utente che fa il push).
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+
+jobs:
+  test-e-immagine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        run: docker build --target test -t didup-calendar-sync:test .
+
+      - name: Versione e tag
+        id: v
+        run: |
+          REGISTRY="$(echo "${{ gitea.server_url }}" | sed -E 's#^https?://##; s#/$##')"
+          IMAGE="$REGISTRY/$(echo "${{ gitea.repository }}" | tr '[:upper:]' '[:lower:]')"
+          SHA="${GITHUB_SHA::7}"
+          TAGS="$IMAGE:sha-$SHA"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            TAGS="$TAGS $IMAGE:$VERSION $IMAGE:latest"
+          else
+            VERSION="$(TZ=Europe/Rome date +%Y.%m.%d)-$SHA"
+            [ "$GITHUB_REF_NAME" = "main" ] && TAGS="$TAGS $IMAGE:edge"
+          fi
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+          echo "versione $VERSION -> $TAGS"
+
+      - name: Build e push
+        env:
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$REGISTRY_TOKEN" ]; then echo "REGISTRY_TOKEN non impostato: immagine non pubblicata"; exit 0; fi
+          echo "$REGISTRY_TOKEN" | docker login "${{ steps.v.outputs.registry }}" -u "${{ gitea.actor }}" --password-stdin
+          PRIMO=""
+          for t in ${{ steps.v.outputs.tags }}; do
+            if [ -z "$PRIMO" ]; then
+              docker build --build-arg VERSION="${{ steps.v.outputs.version }}" -t "$t" .
+              PRIMO="$t"
+            else
+              docker tag "$PRIMO" "$t"
+            fi
+            docker push "$t"
+          done
+          docker logout "${{ steps.v.outputs.registry }}"
