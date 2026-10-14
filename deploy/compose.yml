@@ -20,7 +20,7 @@ services:
       HOME: /tmp
     # Porta delle metriche: METRICS_PORT nel container, METRICS_BIND (indirizzo:porta) sull'host, di
     # default solo localhost. Per Prometheus/Uptime Kuma su un altro host: METRICS_BIND=0.0.0.0:9105. Se girano come container sullo stesso host, meglio
-    # togliere "ports" e collegare lo stack alla loro rete Docker (vedi README, Monitoraggio).
+    # usare anche compose.monitoraggio.yml, che toglie "ports" e collega le loro reti Docker.
     ports:
       - "${METRICS_BIND:-127.0.0.1:9105}:${METRICS_PORT:-9105}"
     volumes:

@@ -242,9 +242,13 @@ lo script espone due endpoint HTTP:
 
 Nel compose la porta del container segue `METRICS_PORT`; sull'host è pubblicata su `METRICS_BIND`
 (indirizzo:porta, di default `127.0.0.1:9105`, cioè solo in locale). Se Prometheus o Uptime Kuma
-sono su un altro host usa `METRICS_BIND=0.0.0.0:9105`; se sono container sullo stesso host, togli
-`ports:` e collega il servizio alla loro rete Docker (`networks:` con `external: true`), poi usa
-`didup-calendar-sync:<METRICS_PORT>` come destinazione. Negli esempi sotto la porta è 9105.
+sono su un altro host usa `METRICS_BIND=0.0.0.0:9105`. Se sono container sullo stesso host, aggiungi
+`deploy/compose.monitoraggio.yml` (in Portainer: *Additional paths*): collega il servizio alle reti Docker di Prometheus e Kuma, configurabili con `PROMETHEUS_NETWORK` e
+`KUMA_NETWORK` (default `monitoring`; i nomi con `docker network ls`). La destinazione diventa
+`didup-calendar-sync:<METRICS_PORT>`.
+```bash
+docker compose -f compose.yml -f compose.monitoraggio.yml up -d
+``` Negli esempi sotto la porta è 9105.
 
 | Metrica | Significato |
 | --- | --- |
@@ -592,9 +596,13 @@ script exposes two HTTP endpoints:
 
 In the compose the container port follows `METRICS_PORT`; on the host it is published on
 `METRICS_BIND` (address:port, default `127.0.0.1:9105`, i.e. local only). If Prometheus or Uptime
-Kuma run on another host use `METRICS_BIND=0.0.0.0:9105`; if they are containers on the same host,
-remove `ports:` and attach the service to their Docker network (`networks:` with `external: true`),
-then target `didup-calendar-sync:<METRICS_PORT>`. The examples below use port 9105.
+Kuma run on another host use `METRICS_BIND=0.0.0.0:9105`. If they are containers on the same host,
+add `deploy/compose.monitoraggio.yml` (in Portainer: *Additional paths*): it attaches the service to the Prometheus and Kuma Docker networks, set with `PROMETHEUS_NETWORK` and
+`KUMA_NETWORK` (default `monitoring`; names from `docker network ls`). The target becomes
+`didup-calendar-sync:<METRICS_PORT>`.
+```bash
+docker compose -f compose.yml -f compose.monitoraggio.yml up -d
+``` The examples below use port 9105.
 
 | Metric | Meaning |
 | --- | --- |

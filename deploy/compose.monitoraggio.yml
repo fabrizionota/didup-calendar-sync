@@ -1,0 +1,23 @@
+# Aggiunta facoltativa a compose.yml: collega il servizio alle reti Docker già esistenti di
+# Prometheus e Uptime Kuma, così raggiungono /metrics e /healthz direttamente. La porta di
+# compose.yml resta pubblicata solo su 127.0.0.1 (METRICS_BIND): innocua, ma non serve più.
+#   docker compose -f compose.yml -f compose.monitoraggio.yml up -d
+#   (Portainer: "Additional paths" dello stack)
+# Nomi delle reti configurabili (docker network ls); se Prometheus e Kuma sono sulla stessa rete,
+# metti lo stesso nome in entrambe le variabili.
+#   PROMETHEUS_NETWORK (default monitoring)  → scrape di didup-calendar-sync:<METRICS_PORT>
+#   KUMA_NETWORK       (default monitoring)  → HTTP su http://didup-calendar-sync:<METRICS_PORT>/healthz
+services:
+  didup-calendar-sync:
+    networks:
+      - default             # uscita verso Argo, Google, notifiche
+      - prometheus
+      - kuma
+
+networks:
+  prometheus:
+    external: true
+    name: ${PROMETHEUS_NETWORK:-monitoring}
+  kuma:
+    external: true
+    name: ${KUMA_NETWORK:-monitoring}
