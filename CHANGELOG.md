@@ -23,13 +23,14 @@ Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabri
 - `HA_TOKEN` e `TELEGRAM_BOT_TOKEN` vuoti valgono come non impostati: si usa il valore del config
   (prima una variabile vuota nello stack lo cancellava). Errore chiaro se manca il token del bot.
 - PoC 07: verifica e prova su tutte le chat Telegram (getChat).
+- Monitoraggio: `[monitoraggio] kuma_push_url` e `porta` anche nel config, per chi non può aggiungere
+  variabili al container (`KUMA_PUSH_URL` e `METRICS_PORT`, se non vuote, vincono).
 
 ### 2026.10.14
 - Monitoraggio: endpoint `/metrics` per Prometheus (giri, durata, eventi, notifiche, allegati,
   elementi visti per tipo, versione dell'app Argo) e `/healthz` (200/503), attivi con `METRICS_PORT`
   (9105 nel compose, pubblicata solo su localhost: `METRICS_BIND`). Solo libreria standard.
-- Uptime Kuma: push a fine giro (`up` con durata, `down` con l'errore) con `KUMA_PUSH_URL`, oppure
-  `[monitoraggio] kuma_push_url` nel config (anche `porta`): le variabili d'ambiente vincono.
+- Uptime Kuma: push a fine giro (`up` con durata, `down` con l'errore) con `KUMA_PUSH_URL`.
 - `deploy/compose.monitoraggio.yml`: reti Docker di Prometheus e Kuma configurabili
   (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
 - Regole Prometheus d'esempio nel README, compreso il controllo di plausibilità sulle lezioni.
@@ -78,14 +79,15 @@ Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionot
 - Empty `HA_TOKEN` and `TELEGRAM_BOT_TOKEN` count as unset: the config value is used (an empty
   variable in the stack used to wipe it). Clear error if the bot token is missing.
 - PoC 07: checks and tests every Telegram chat (getChat).
+- Monitoring: `[monitoraggio] kuma_push_url` and `porta` also in the config, for those who can't add
+  variables to the container (`KUMA_PUSH_URL` and `METRICS_PORT`, when not empty, win).
 
 ### 2026.10.14
 - Monitoring: `/metrics` endpoint for Prometheus (runs, duration, events, notifications,
   attachments, items seen per type, Argo app version) and `/healthz` (200/503), enabled by
   `METRICS_PORT` (9105 in the compose, published on localhost only: `METRICS_BIND`). Standard
   library only.
-- Uptime Kuma: push after each run (`up` with duration, `down` with the error) via `KUMA_PUSH_URL`, or
-  `[monitoraggio] kuma_push_url` in the config (also `porta`): environment variables win.
+- Uptime Kuma: push after each run (`up` with duration, `down` with the error) via `KUMA_PUSH_URL`.
 - `deploy/compose.monitoraggio.yml`: configurable Prometheus and Kuma Docker networks
   (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
 - Example Prometheus rules in the README, including the plausibility check on lessons.
