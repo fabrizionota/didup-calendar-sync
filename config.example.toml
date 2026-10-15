@@ -65,9 +65,15 @@ scadenza_giorni = 0    # solo per "pubblico": dopo N giorni il link non funziona
 # porta = 9105                     # /metrics e /healthz (0 = spento)
 # kuma_push_url = "http://uptime-kuma:3001/api/push/XXXX?status=up&msg=OK&ping="   # contiene un token
 
+# Errori temporanei di Argo (HTTP 500/502/503/504, timeout, rete): la richiesta viene ripetuta.
+# [rete]
+# tentativi = 3          # tentativi per richiesta, compreso il primo (1 = nessun nuovo tentativo)
+# attesa_secondi = 30    # attesa prima del 2° tentativo, triplicata ai successivi (30 s, 90 s, …)
+
 [notifiche]
 # disponibili: voti, bacheca, note, promemoria, assenze, compiti
 tipi = ["voti", "bacheca", "note", "promemoria"]
+dopo_fallimenti = 2     # avviso di sync fallita solo dopo N giri falliti di fila (1 = subito)
 
 [notifiche.homeassistant]
 url = "http://homeassistant.local:8123"   # o l'IP interno, es. http://192.168.1.x:8123

@@ -338,7 +338,14 @@ Dettagli in [pocs/README.md](pocs/README.md).
   passati restano come storico.
 - Protezione: se in un giro Argo non restituisce nulla, o sparirebbero più di metà degli eventi
   esistenti (e più di 10), la cancellazione viene saltata.
-- Se la sync fallisce arriva **una** notifica di errore, e una quando torna a funzionare.
+- Errori temporanei di Argo (HTTP 500/502/503/504, timeout, rete): la richiesta viene ripetuta nello
+  stesso giro (`[rete] tentativi = 3`, attesa `attesa_secondi = 30` triplicata a ogni tentativo:
+  30 s, 90 s). Se l'errore persiste l'account viene saltato fino al giro successivo e nel log c'è
+  una sola riga, es. `[SC12345] sync fallita, Argo non raggiungibile: HTTP 500 su login`, senza
+  traceback (che resta per gli errori inattesi).
+- Se la sync fallisce arriva **una** notifica di errore, solo dopo `[notifiche] dopo_fallimenti`
+  giri falliti di fila (default 2: un disservizio breve di Argo non disturba), e una quando torna
+  a funzionare. `/healthz` e Uptime Kuma segnalano invece subito ogni giro fallito.
 - `argo-client-version` viene letto dall'App Store a ogni giro, per evitare il 410 da client obsoleto.
 - All'avvio il log mostra la versione e una riga per alunno con notifiche attive e archivio degli
   allegati, es. `didup-calendar-sync 2026.10.13-abc1234 …` e `config /data/config.toml: Anna
@@ -670,7 +677,14 @@ how the main script interprets the same data. Details (in Italian) in [pocs/READ
 - Homework: a change by the teacher updates the lesson (or the 📚 event); past 📚 events stay as history.
 - Safety net: if Argo returns nothing in a run, or more than half of the existing events (and more
   than 10) would disappear, deletion is skipped.
-- When a sync fails you get **one** error notification, and one when it recovers.
+- Temporary Argo errors (HTTP 500/502/503/504, timeouts, network): the request is retried within
+  the same run (`[rete] tentativi = 3`, wait `attesa_secondi = 30` tripled on every attempt: 30 s,
+  90 s). If the error persists the account is skipped until the next run and the log gets a single
+  line, e.g. `[SC12345] sync fallita, Argo non raggiungibile: HTTP 500 su login`, with no traceback
+  (kept for unexpected errors).
+- When a sync fails you get **one** error notification, only after `[notifiche] dopo_fallimenti`
+  failed runs in a row (default 2: a short Argo outage doesn't bother you), and one when it
+  recovers. `/healthz` and Uptime Kuma report every failed run right away instead.
 - `argo-client-version` is read from the App Store on every run, to avoid the 410 for outdated clients.
 - At startup the log shows the version and one line per pupil with active notifications and the
   attachment archive, e.g. `didup-calendar-sync 2026.10.13-abc1234 …` and `config /data/config.toml:
