@@ -59,6 +59,12 @@ password_env = "NEXTCLOUD_APP_PASSWORD"
 link = "interno"
 scadenza_giorni = 0    # solo per "pubblico": dopo N giorni il link non funziona più (0 = mai)
 
+# Monitoraggio (facoltativo). Le variabili d'ambiente METRICS_PORT e KUMA_PUSH_URL, se impostate,
+# vincono su questi valori: qui servono quando non si possono aggiungere variabili al container.
+# [monitoraggio]
+# porta = 9105                     # /metrics e /healthz (0 = spento)
+# kuma_push_url = "http://uptime-kuma:3001/api/push/XXXX?status=up&msg=OK&ping="   # contiene un token
+
 [notifiche]
 # disponibili: voti, bacheca, note, promemoria, assenze, compiti
 tipi = ["voti", "bacheca", "note", "promemoria"]
