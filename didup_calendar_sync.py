@@ -73,6 +73,15 @@ def load_config(path: Path) -> dict:
     if tg := n.get("telegram"):
         tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", tg.get("bot_token", ""))
     n.setdefault("tipi", ["voti", "bacheca", "note", "promemoria"])
+    n.setdefault("dopo_fallimenti", 2)   # avviso di sync fallita dopo N giri falliti di fila
+    if not isinstance(n["dopo_fallimenti"], int) or n["dopo_fallimenti"] < 1:
+        raise ValueError(f"[notifiche] dopo_fallimenti = {n['dopo_fallimenti']!r}: intero >= 1")
+    rete = cfg.setdefault("rete", {})    # errori temporanei di Argo (HTTP 5xx, timeout)
+    rete.setdefault("tentativi", 3)      # tentativi per richiesta, compreso il primo
+    rete.setdefault("attesa_secondi", 30)  # attesa prima del 2° tentativo, triplicata ai successivi
+    for k, minimo in (("tentativi", 1), ("attesa_secondi", 0)):
+        if not isinstance(rete[k], int) or rete[k] < minimo:
+            raise ValueError(f"[rete] {k} = {rete[k]!r}: intero >= {minimo}")
     nomi = {al.get("nome") for al in cfg.get("alunni", [])}
     for d in (n.get("homeassistant") or {}).get("destinatari", []):
         if d["alunni"] is not None and (sconosciuti := set(d["alunni"]) - nomi):
@@ -243,8 +252,57 @@ def migra_state_key(state: "State", al: dict) -> None:
 # --------------------------------------------------------------------------- #
 # Client Argo multi-profilo                                                   #
 # --------------------------------------------------------------------------- #
+ERRORI_RETE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
+
+
+def errore_temporaneo(e: BaseException) -> bool:
+    """Errori di Argo per cui ha senso riprovare: server in errore (HTTP 500/502/503/504) o rete."""
+    return isinstance(e, ERRORI_RETE) or (isinstance(e, DiDUPError) and e.status_code in (500, 502, 503, 504))
+
+
+def descrivi_errore(e: BaseException) -> str:
+    """Errore in una riga: niente pagine HTML di errore, niente URL con parametri."""
+    if isinstance(e, DiDUPError):
+        dove = (e.request_url or "").split("?")[0].rstrip("/").rsplit("/", 1)[-1]
+        testo = " ".join(str(e.message or "").split())
+        if not testo or testo.lstrip().startswith("<"):
+            testo = ""
+        stato = f"HTTP {e.status_code}" if e.status_code else type(e).__name__
+        return " ".join(x for x in (stato, short(testo, 120), f"su {dove}" if dove else "") if x)
+    if isinstance(e, ERRORI_RETE):
+        return f"{type(e).__name__} (rete)"
+    return f"{type(e).__name__}: {short(str(e), 300)}"
+
+
+class SyncFallita(RuntimeError):
+    """Uno o più account non sincronizzati: i dettagli sono già nel log, una riga per account."""
+
+
 class MultiProfiloClient(DiDUPClient):
-    """didupwrapper usa solo il primo profilo del login: qui li teniamo tutti."""
+    """didupwrapper usa solo il primo profilo del login: qui li teniamo tutti.
+    Le richieste con errori temporanei vengono ripetute (tentativi, attesa crescente); se un
+    errore persiste dopo tutti i tentativi, il resto del giro non riprova più (fallisce subito)."""
+
+    tentativi: int = 3
+    attesa_secondi: int = 30
+    _riprova: bool = True
+
+    async def _request(self, method: str, path: str, **kwargs):
+        prova = 1
+        while True:
+            try:
+                return await super()._request(method, path, **dict(kwargs))
+            except Exception as e:  # noqa: BLE001
+                if not (errore_temporaneo(e) and self._riprova):
+                    raise
+                if prova >= self.tentativi:
+                    self._riprova = False
+                    raise
+                attesa = self.attesa_secondi * 3 ** (prova - 1)
+                log.warning("Argo: %s, nuovo tentativo tra %d s (%d/%d)", descrivi_errore(e), attesa,
+                            prova + 1, self.tentativi)
+                await asyncio.sleep(attesa)
+                prova += 1
 
     async def _login_applicativo(self):
         dati = await self._post(_LOGIN_PATH, json={
@@ -1322,12 +1380,14 @@ def giorni_orario(cfg: dict, oggi: date) -> list[date]:
             if (oggi + timedelta(days=i)).weekday() < 6]  # niente domeniche
 
 
-def client_argo(acc: dict) -> "MultiProfiloClient":
+def client_argo(acc: dict, rete: dict | None = None) -> "MultiProfiloClient":
     if not acc["password"]:
         raise RuntimeError(f"Password Argo mancante per {acc['codice_scuola']}/{acc['username']} "
                            f"(variabile {acc['password_env']})")
-    return MultiProfiloClient(acc["codice_scuola"], acc["username"], acc["password"],
-                              auto_versione=True)
+    cli = MultiProfiloClient(acc["codice_scuola"], acc["username"], acc["password"], auto_versione=True)
+    if rete:
+        cli.tentativi, cli.attesa_secondi = rete["tentativi"], rete["attesa_secondi"]
+    return cli
 
 
 async def sync_alunno(cli: "MultiProfiloClient", al: dict, cal: "Calendar",
@@ -1415,7 +1475,7 @@ async def run_once(cfg: dict, args, state: State, notifier: Notifier) -> None:
     errori = []
     for acc, als in gruppi:  # un account che fallisce non blocca gli altri
         try:
-            async with client_argo(acc) as cli:
+            async with client_argo(acc, cfg["rete"]) as cli:
                 log.info("[%s] argo-client-version %s, %d profili",
                          acc["codice_scuola"], cli.versione, len(cli.profili))
                 METRICHE.azzera("didup_argo_client_version_info", scuola=acc["codice_scuola"])
@@ -1424,10 +1484,35 @@ async def run_once(cfg: dict, args, state: State, notifier: Notifier) -> None:
                 for al in als:
                     await sync_alunno(cli, al, cal, state, notifier, oggi, archivio(al))
         except Exception as e:  # noqa: BLE001
-            log.exception("[%s] sync fallita", acc["codice_scuola"])
-            errori.append(f"{acc['codice_scuola']}: {type(e).__name__}: {e}")
+            if errore_temporaneo(e):   # Argo giù o rete: una riga, senza traceback
+                log.error("[%s] sync fallita, Argo non raggiungibile: %s", acc["codice_scuola"], descrivi_errore(e))
+            else:
+                log.exception("[%s] sync fallita", acc["codice_scuola"])
+            errori.append(f"{acc['codice_scuola']}: {descrivi_errore(e)}")
     if errori:
-        raise RuntimeError("; ".join(errori))
+        raise SyncFallita("; ".join(errori))
+
+
+def aggiorna_errori(state: "State", notifier, errore: str | None, soglia: int) -> None:
+    """Conta i giri falliti di fila: avviso solo al giro numero ``soglia`` (un disservizio breve di
+    Argo non disturba), avviso di ripristino solo se l'avviso di errore era partito.
+    ``state["error"]`` resta l'esito dell'ultimo giro (lo usa l'healthcheck del compose)."""
+    d = state.data
+    notificato = d.get("errore_notificato", d.get("error", False))  # state.json delle versioni precedenti
+    if errore is None:
+        if notificato:
+            notifier.send("Argo sync", "✅ Sincronizzazione tornata a funzionare")
+        d.update(error=False, fallimenti=0, errore_notificato=False)
+        return
+    d["fallimenti"] = d.get("fallimenti", 0) + 1
+    d["error"] = True
+    if not notificato and d["fallimenti"] >= soglia:
+        giri = f" ({d['fallimenti']} giri di fila)" if d["fallimenti"] > 1 else ""
+        notifier.send("Argo sync", f"❌ Sync fallita{giri}: {errore}")
+        notificato = True
+    elif not notificato:
+        log.info("sync fallita %d volta/e di fila: avviso al giro %d", d["fallimenti"], soglia)
+    d["errore_notificato"] = notificato
 
 
 def versione() -> str:
@@ -1504,19 +1589,19 @@ def main() -> None:
         log.info("monitoraggio: push Uptime Kuma attivo (%s)",
                  "variabile KUMA_PUSH_URL" if os.environ.get("KUMA_PUSH_URL") else "config [monitoraggio]")
 
+    soglia = cfg["notifiche"]["dopo_fallimenti"]
     while True:
         inizio, errore = time.time(), None
         try:
             asyncio.run(run_once(cfg, args, state, notifier))
-            if state.data.get("error") and not una_tantum:
-                notifier.send("Argo sync", "✅ Sincronizzazione tornata a funzionare")
-            state.data["error"] = False
+        except SyncFallita as e:       # account già descritti nel log, una riga ciascuno
+            errore = short(str(e), 300)
+            log.error("Sync fallita: %s", errore)
         except Exception as e:  # noqa: BLE001
             log.exception("Sync fallita")
-            errore = f"{type(e).__name__}: {short(str(e), 300)}"
-            if not state.data.get("error") and not una_tantum:
-                notifier.send("Argo sync", f"❌ Sync fallita: {errore}")
-            state.data["error"] = True
+            errore = descrivi_errore(e)
+        if not una_tantum:
+            aggiorna_errori(state, notifier, errore, soglia)
         fine = time.time()
         if not una_tantum:
             registra_giro(inizio, fine, errore is None)
