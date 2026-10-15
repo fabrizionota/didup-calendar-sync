@@ -74,10 +74,10 @@ def carica_config(path: Path | None) -> tuple[dict, Path]:
                  "username e password_env (vedi config.example.toml)")
     n = cfg.setdefault("notifiche", {})
     if ha := n.get("homeassistant"):
-        ha["token"] = os.environ.get("HA_TOKEN", ha.get("token", ""))
+        ha["token"] = os.environ.get("HA_TOKEN") or ha.get("token", "")
         ha["service"] = ha.get("service", "").removeprefix("notify.")  # accetta anche "notify.xxx"
     if tg := n.get("telegram"):
-        tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", tg.get("bot_token", ""))
+        tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN") or tg.get("bot_token", "")
     cfg.setdefault("alunni", [])
     return cfg, p
 

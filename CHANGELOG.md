@@ -16,6 +16,13 @@ Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabri
   il ripristino si notifica solo se l'avviso era partito. `/healthz` e Kuma restano immediati.
 - Log: gli errori noti di Argo stanno in una riga (`HTTP 500 su login`), senza traceback né pagina
   HTML; la notifica di errore riporta la stessa descrizione.
+- Telegram a più chat: `[[notifiche.telegram.destinatari]]` con filtri facoltativi `tipi` e `alunni`,
+  come per Home Assistant; `chat_id` resta valido e riceve tutto. Messaggi oltre 4000 caratteri troncati.
+- Sicurezza: il token del bot Telegram non finisce più nel log quando un invio fallisce; id delle chat
+  abbreviati in log e metriche.
+- `HA_TOKEN` e `TELEGRAM_BOT_TOKEN` vuoti valgono come non impostati: si usa il valore del config
+  (prima una variabile vuota nello stack lo cancellava). Errore chiaro se manca il token del bot.
+- PoC 07: verifica e prova su tutte le chat Telegram (getChat).
 
 ### 2026.10.14
 - Monitoraggio: endpoint `/metrics` per Prometheus (giri, durata, eventi, notifiche, allegati,
@@ -63,6 +70,14 @@ Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionot
   recovery is notified only if the alert went out. `/healthz` and Kuma stay immediate.
 - Logs: known Argo errors fit on one line (`HTTP 500 su login`), with no traceback or HTML page;
   the error notification carries the same description.
+- Telegram to several chats: `[[notifiche.telegram.destinatari]]` with optional `tipi` and `alunni`
+  filters, as for Home Assistant; `chat_id` still works and receives everything. Messages over 4000
+  characters are truncated.
+- Security: the Telegram bot token no longer ends up in the log when a send fails; chat ids are
+  shortened in log and metrics.
+- Empty `HA_TOKEN` and `TELEGRAM_BOT_TOKEN` count as unset: the config value is used (an empty
+  variable in the stack used to wipe it). Clear error if the bot token is missing.
+- PoC 07: checks and tests every Telegram chat (getChat).
 
 ### 2026.10.14
 - Monitoring: `/metrics` endpoint for Prometheus (runs, duration, events, notifications,

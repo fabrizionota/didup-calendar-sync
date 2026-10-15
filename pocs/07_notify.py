@@ -7,7 +7,7 @@
 
 Default (sola lettura): mostra la configurazione e il messaggio di prova, verifica che HA
 risponda (GET /api/, ogni servizio notify esistente: service e [[destinatari]], con i loro
-filtri) e che il bot Telegram sia valido (getMe). Con --scrivi: invia davvero la notifica di prova a
+filtri) e che il bot Telegram sia valido (getMe) e veda ogni chat (getChat). Con --scrivi: invia davvero la notifica di prova a
 tutti i destinatari.
 
   uv run pocs/07_notify.py [-c config.toml] [--solo ha|telegram] [--scrivi]
@@ -46,14 +46,31 @@ def verifica_ha(c: httpx.Client, ha: dict) -> dict:
     return {"api": "ok", "servizi": esito, "notify": notify}
 
 
+def chat_tg(tg: dict) -> list[tuple[str, str]]:
+    """(chat_id, filtri) per chat_id e ogni [[notifiche.telegram.destinatari]]."""
+    out = [(str(tg["chat_id"]), "tutto")] if tg.get("chat_id") else []
+    for d in tg.get("destinatari", []):
+        filtri = ", ".join(f"{k}={'/'.join(d[k])}" for k in ("tipi", "alunni") if d.get(k)) or "tutto"
+        out.append((str(d.get("chat_id", "")), filtri))
+    return out
+
+
 def verifica_tg(c: httpx.Client, tg: dict) -> dict:
-    r = c.get(f"https://api.telegram.org/bot{tg.get('bot_token', '')}/getMe")
+    base = f"https://api.telegram.org/bot{tg.get('bot_token', '')}"
+    r = c.get(f"{base}/getMe")
     dati = r.json()
     if not dati.get("ok"):
         raise SystemExit(f"Telegram getMe: {r.status_code} {dati.get('description')}")
     bot = dati["result"]
-    print(f"✅ bot @{bot.get('username')} (id {bot.get('id')}), chat_id configurato: {tg.get('chat_id')}")
-    return {"bot": bot.get("username")}
+    print(f"✅ bot @{bot.get('username')} (id {bot.get('id')})")
+    esito = {}
+    for chat_id, filtri in chat_tg(tg):   # getChat: il bot deve essere nella chat (o averla avviata)
+        info = c.get(f"{base}/getChat", params={"chat_id": chat_id}).json()
+        esito[chat_id] = bool(info.get("ok"))
+        nome = (info.get("result") or {}).get("title") or (info.get("result") or {}).get("first_name") or ""
+        print(f"{'✅' if info.get('ok') else '❌'} chat {chat_id} {nome} ({filtri})"
+              + ("" if info.get("ok") else f": {info.get('description')} (premi Avvia nel bot o aggiungilo al gruppo)"))
+    return {"bot": bot.get("username"), "chat": esito}
 
 
 def main() -> None:
@@ -116,10 +133,11 @@ def invia_e_verifica(canali: dict, scrivi: bool, titolo_msg: str, messaggio: str
             tg = canali["telegram"]
             esito["telegram"] = verifica_tg(c, tg)
             if scrivi:
-                r = c.post(f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage",
-                           json={"chat_id": tg["chat_id"], "text": f"{titolo_msg}\n{messaggio}"})
-                print(f"sendMessage: {r.status_code} {r.json().get('description', 'ok')}")
-                r.raise_for_status()
+                for chat_id, _ in chat_tg(tg):
+                    r = c.post(f"https://api.telegram.org/bot{tg['bot_token']}/sendMessage",
+                               json={"chat_id": chat_id, "text": f"{titolo_msg}\n{messaggio}"})
+                    print(f"sendMessage {chat_id}: {r.status_code} {r.json().get('description', 'ok')}")
+                    r.raise_for_status()
                 esito["telegram"]["inviata"] = True
 
 
