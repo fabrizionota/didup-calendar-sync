@@ -16,6 +16,7 @@ Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabri
   il ripristino si notifica solo se l'avviso era partito. `/healthz` e Kuma restano immediati.
 - Log: gli errori noti di Argo stanno in una riga (`HTTP 500 su login`), senza traceback né pagina
   HTML; la notifica di errore riporta la stessa descrizione.
+- `PRIVACY.md` (informativa GDPR) e `TERMS.md` (termini di servizio), in italiano e inglese.
 
 ### 2026.10.14
 - Monitoraggio: endpoint `/metrics` per Prometheus (giri, durata, eventi, notifiche, allegati,
@@ -63,6 +64,7 @@ Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionot
   recovery is notified only if the alert went out. `/healthz` and Kuma stay immediate.
 - Logs: known Argo errors fit on one line (`HTTP 500 su login`), with no traceback or HTML page;
   the error notification carries the same description.
+- `PRIVACY.md` (GDPR privacy notice) and `TERMS.md` (terms of service), in Italian and English.
 
 ### 2026.10.14
 - Monitoring: `/metrics` endpoint for Prometheus (runs, duration, events, notifications,
