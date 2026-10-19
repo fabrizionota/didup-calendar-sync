@@ -21,7 +21,7 @@ Funziona con più figli e più scuole: ogni alunno ha il suo account Argo.
 
 > **Progetto non ufficiale**, non affiliato né approvato da Argo Software. Usa API non documentate
 > dell'app Argo didUP Famiglia, che possono cambiare senza preavviso; ognuno lo usa con le proprie
-> credenziali e sotto la propria responsabilità. Licenza [MIT](LICENSE).
+> credenziali e sotto la propria responsabilità. Licenza [MIT](LICENSE), privacy in [PRIVACY.md](PRIVACY.md).
 
 ### Come è fatto
 ```
@@ -36,6 +36,7 @@ pocs/                      script esplorativi per verificare ogni integrazione (
 deploy/compose.yml         installazione con Docker Compose (o stack Portainer)
 .github/workflows/ci.yml   CI: test, immagine multi-arch su GHCR
 LICENSE, SECURITY.md       licenza MIT, segnalazioni di sicurezza
+PRIVACY.md                 informativa privacy (GDPR)
 ```
 `data/`, `.env`, `pocs/out/` sono in `.gitignore`: contengono credenziali e dati dei figli.
 
@@ -385,7 +386,7 @@ its own Argo account.
 
 > **Unofficial project**, not affiliated with or endorsed by Argo Software. It uses undocumented APIs
 > of the Argo didUP Famiglia app, which may change without notice; everyone uses it with their own
-> credentials and at their own risk. [MIT](LICENSE) licence.
+> credentials and at their own risk. [MIT](LICENSE) licence, privacy in [PRIVACY.md](PRIVACY.md).
 
 ### Layout
 ```
@@ -400,6 +401,7 @@ pocs/                      exploratory scripts to check each integration (see po
 deploy/compose.yml         Docker Compose install (or Portainer stack)
 .github/workflows/ci.yml   CI: tests, multi-arch image on GHCR
 LICENSE, SECURITY.md       MIT licence, security reports
+PRIVACY.md                 privacy notice (GDPR)
 ```
 `data/`, `.env`, `pocs/out/` are git-ignored: they hold credentials and the children's data.
 
