@@ -85,8 +85,14 @@ service = "mobile_app_telefono"     # riceve tutto; elenco dei servizi: uv run p
 # tipi = ["voti"]
 # alunni = ["Primo"]
 
+# Telegram (facoltativo): bot da @BotFather. chat_id riceve tutto; altre chat con filtri facoltativi.
 # [notifiche.telegram]
+# bot_token = "123456:ABC…"        # o variabile TELEGRAM_BOT_TOKEN (vince se non vuota)
 # chat_id = "123456789"
+# [[notifiche.telegram.destinatari]]
+# chat_id = "-1001234567890"       # es. gruppo di famiglia (id negativo)
+# tipi = ["voti"]
+# alunni = ["Primo"]
 
 # Un blocco per figlio, ognuno con le sue credenziali Argo: nessun account "principale".
 # Figli con lo stesso account (stessa scuola e username) condividono un solo login.

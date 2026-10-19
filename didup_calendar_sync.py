@@ -67,11 +67,14 @@ def load_config(path: Path) -> dict:
                          "codice_scuola, username e password_env (vedi config.example.toml)")
     n = cfg.setdefault("notifiche", {})
     if ha := n.get("homeassistant"):
-        ha["token"] = os.environ.get("HA_TOKEN", ha.get("token", ""))
+        ha["token"] = os.environ.get("HA_TOKEN") or ha.get("token", "")  # vuota = non impostata
         ha["service"] = ha.get("service", "").removeprefix("notify.")  # accetta anche "notify.xxx"
         ha["destinatari"] = destinatari_ha(ha)
     if tg := n.get("telegram"):
-        tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN", tg.get("bot_token", ""))
+        tg["bot_token"] = os.environ.get("TELEGRAM_BOT_TOKEN") or tg.get("bot_token", "")
+        tg["destinatari"] = destinatari_tg(tg)
+        if tg["destinatari"] and not tg["bot_token"]:
+            raise ValueError("[notifiche.telegram]: manca il token del bot (bot_token o TELEGRAM_BOT_TOKEN)")
     n.setdefault("tipi", ["voti", "bacheca", "note", "promemoria"])
     n.setdefault("dopo_fallimenti", 2)   # avviso di sync fallita dopo N giri falliti di fila
     if not isinstance(n["dopo_fallimenti"], int) or n["dopo_fallimenti"] < 1:
@@ -83,10 +86,11 @@ def load_config(path: Path) -> dict:
         if not isinstance(rete[k], int) or rete[k] < minimo:
             raise ValueError(f"[rete] {k} = {rete[k]!r}: intero >= {minimo}")
     nomi = {al.get("nome") for al in cfg.get("alunni", [])}
-    for d in (n.get("homeassistant") or {}).get("destinatari", []):
-        if d["alunni"] is not None and (sconosciuti := set(d["alunni"]) - nomi):
-            raise ValueError(f"[[notifiche.homeassistant.destinatari]] {d['service']}: alunni sconosciuti "
-                             f"{sorted(sconosciuti)}")
+    for sezione, chiave in (("homeassistant", "service"), ("telegram", "chat_id")):
+        for d in (n.get(sezione) or {}).get("destinatari", []):
+            if d["alunni"] is not None and (sconosciuti := set(d["alunni"]) - nomi):
+                raise ValueError(f"[[notifiche.{sezione}.destinatari]] {d[chiave]}: alunni sconosciuti "
+                                 f"{sorted(sconosciuti)}")
     c = cfg.setdefault("calendario", {})
     c.setdefault("timezone", "Europe/Rome")
     o = cfg.setdefault("orario", {})
@@ -155,26 +159,48 @@ def archivio_allegati(a: dict, default: str) -> str:
 TIPI_NOTIFICA = ("voti", "bacheca", "note", "promemoria", "assenze", "compiti")
 
 
-def destinatari_ha(ha: dict) -> list[dict]:
-    """Servizi notify di Home Assistant: ``service`` riceve tutto; ogni
-    ``[[notifiche.homeassistant.destinatari]]`` può limitarsi a ``tipi`` e/o ``alunni``."""
-    out = [{"service": ha["service"], "tipi": None, "alunni": None}] if ha.get("service") else []
-    for d in ha.get("destinatari", []):
-        if isinstance(d, dict) and "service" in d and set(d) <= {"service", "tipi", "alunni"} \
+def _destinatari(sezione: dict, chiave: str, nome: str, pulisci: Callable[[str], str] = str.strip) -> list[dict]:
+    """``chiave`` della sezione riceve tutto; ogni ``[[notifiche.<nome>.destinatari]]`` può
+    limitarsi a ``tipi`` e/o ``alunni``."""
+    out = [{chiave: pulisci(str(sezione[chiave])), "tipi": None, "alunni": None}] if sezione.get(chiave) else []
+    for d in sezione.get("destinatari", []):
+        if isinstance(d, dict) and chiave in d and set(d) <= {chiave, "tipi", "alunni"} \
                 and d.get("tipi", []) is not None and d.get("alunni", []) is not None:
-            servizio = str(d["service"]).removeprefix("notify.")
+            ident = pulisci(str(d[chiave]))
         else:
-            raise ValueError(f"[[notifiche.homeassistant.destinatari]] non valido: {d!r} "
-                             "(chiavi: service, tipi, alunni)")
-        if not servizio:
-            raise ValueError("[[notifiche.homeassistant.destinatari]]: service vuoto")
+            raise ValueError(f"[[notifiche.{nome}.destinatari]] non valido: {d!r} "
+                             f"(chiavi: {chiave}, tipi, alunni)")
+        if not ident:
+            raise ValueError(f"[[notifiche.{nome}.destinatari]]: {chiave} vuoto")
         tipi = d.get("tipi")
         if tipi is not None and (ignoti := set(tipi) - set(TIPI_NOTIFICA)):
-            raise ValueError(f"[[notifiche.homeassistant.destinatari]] {servizio}: tipi sconosciuti "
+            raise ValueError(f"[[notifiche.{nome}.destinatari]] {ident}: tipi sconosciuti "
                              f"{sorted(ignoti)} (ammessi: {', '.join(TIPI_NOTIFICA)})")
-        out.append({"service": servizio, "tipi": list(tipi) if tipi is not None else None,
+        out.append({chiave: ident, "tipi": list(tipi) if tipi is not None else None,
                     "alunni": list(d["alunni"]) if d.get("alunni") is not None else None})
     return out
+
+
+def destinatari_ha(ha: dict) -> list[dict]:
+    """Servizi notify di Home Assistant (``service`` e ``[[notifiche.homeassistant.destinatari]]``)."""
+    return _destinatari(ha, "service", "homeassistant", lambda s: s.strip().removeprefix("notify."))
+
+
+def destinatari_tg(tg: dict) -> list[dict]:
+    """Chat Telegram (``chat_id`` e ``[[notifiche.telegram.destinatari]]``), stesso bot."""
+    return _destinatari(tg, "chat_id", "telegram")
+
+
+def chat_mascherata(chat_id: str) -> str:
+    """Per log e metriche: l'id completo di una chat non serve."""
+    return f"telegram:…{str(chat_id)[-4:]}"
+
+
+def filtra_destinatari(lista: list[dict], chiave: str, kind: str | None, alunno: str | None) -> list[str]:
+    """Destinatari di questa notifica. Quelle di sistema (kind None: errori, ripristino) vanno solo
+    a chi non ha filtri."""
+    return [d[chiave] for d in lista
+            if (d["tipi"] is None or kind in d["tipi"]) and (d["alunni"] is None or alunno in d["alunni"])]
 
 
 def account_alunno(al: dict) -> dict:
@@ -1166,12 +1192,20 @@ class Notifier:
     def __init__(self, cfg: dict, dry_run: bool, transport: httpx.BaseTransport | None = None):
         self.ha, self.tg, self.dry, self.transport = cfg.get("homeassistant"), cfg.get("telegram"), dry_run, transport
         self.destinatari = (self.ha or {}).get("destinatari") or (destinatari_ha(self.ha) if self.ha else [])
+        self.chat_tg = (self.tg or {}).get("destinatari") or (destinatari_tg(self.tg) if self.tg else [])
 
     def servizi(self, kind: str | None, alunno: str | None) -> list[str]:
-        """Servizi HA che ricevono questa notifica. Quelle di sistema (kind None: errori, ripristino)
-        vanno solo ai destinatari senza filtri."""
-        return [d["service"] for d in self.destinatari
-                if (d["tipi"] is None or kind in d["tipi"]) and (d["alunni"] is None or alunno in d["alunni"])]
+        """Servizi HA che ricevono questa notifica."""
+        return filtra_destinatari(self.destinatari, "service", kind, alunno) if self.ha else []
+
+    def chat(self, kind: str | None, alunno: str | None) -> list[str]:
+        """Chat Telegram che ricevono questa notifica."""
+        return filtra_destinatari(self.chat_tg, "chat_id", kind, alunno) if self.tg else []
+
+    @staticmethod
+    def testo_telegram(title: str, message: str, url: str | None) -> str:
+        testo = f"{title}\n{message}" + (f"\n{url}" if url else "")
+        return testo if len(testo) <= 4000 else testo[:3990] + "…"
 
     @staticmethod
     def payload_ha(title: str, message: str, url: str | None) -> dict:
@@ -1183,8 +1217,8 @@ class Notifier:
 
     def send(self, title: str, message: str, url: str | None = None,
              kind: str | None = None, alunno: str | None = None) -> None:
-        servizi = self.servizi(kind, alunno) if self.ha else []
-        a_chi = ", ".join([f"notify.{s}" for s in servizi] + (["telegram"] if self.tg else [])) or "nessuno"
+        servizi, chat = self.servizi(kind, alunno), self.chat(kind, alunno)
+        a_chi = ", ".join([f"notify.{s}" for s in servizi] + [chat_mascherata(c) for c in chat]) or "nessuno"
         if self.dry:
             log.info("NOTIFICA %s → %s | %s | %s%s", kind or "sistema", a_chi, title,
                      message.replace("\n", " / "), f" | {url}" if url else "")
@@ -1200,14 +1234,21 @@ class Notifier:
                 except httpx.HTTPError as e:
                     log.error("Notifica HA fallita (notify.%s): %s", servizio, e)
                     METRICHE.inc("didup_notification_errors_total", servizio=f"notify.{servizio}")
-            if self.tg:
+            for chat_id in chat:
                 try:
-                    c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
-                           json={"chat_id": self.tg["chat_id"],
-                                 "text": f"{title}\n{message}" + (f"\n{url}" if url else "")}).raise_for_status()
-                except httpx.HTTPError as e:
-                    log.error("Notifica Telegram fallita: %s", e)
-                    METRICHE.inc("didup_notification_errors_total", servizio="telegram")
+                    r = c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
+                               json={"chat_id": chat_id, "text": self.testo_telegram(title, message, url)})
+                    if r.status_code >= 400:
+                        try:
+                            motivo = r.json().get("description", "")
+                        except ValueError:
+                            motivo = ""
+                        raise RuntimeError(f"HTTP {r.status_code} {motivo}".strip())
+                except (httpx.HTTPError, RuntimeError) as e:
+                    # mai l'eccezione di httpx così com'è: l'URL contiene il token del bot
+                    errore = str(e) if isinstance(e, RuntimeError) else type(e).__name__
+                    log.error("Notifica Telegram fallita (%s): %s", chat_mascherata(chat_id), errore)
+                    METRICHE.inc("didup_notification_errors_total", servizio=chat_mascherata(chat_id))
 
 
 # --------------------------------------------------------------------------- #

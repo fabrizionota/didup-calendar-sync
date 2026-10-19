@@ -69,6 +69,9 @@ Password Argo (una variabile per ogni `password_env`), `HA_TOKEN` (token a lunga
 Assistant), `TELEGRAM_BOT_TOKEN`, e per gli allegati su Nextcloud `NEXTCLOUD_APP_PASSWORD` (più,
 facoltative, `NEXTCLOUD_URL` e `NEXTCLOUD_USER`): in `.env` per l'uso locale (vedi `.env.example`),
 nelle *Environment variables* dello stack in Portainer. Per il monitoraggio: `KUMA_PUSH_URL` (segreto), `METRICS_PORT`, `METRICS_BIND`.
+Se non puoi aggiungere variabili al container, `HA_TOKEN` e il token Telegram vanno anche nel config
+(`token` in `[notifiche.homeassistant]`, `bot_token` in `[notifiche.telegram]`): una variabile vuota
+vale come non impostata.
 
 #### Notifiche
 Cosa notificare si sceglie con `[notifiche] tipi` (o `notifiche = [...]` nel singolo alunno). Valori:
@@ -90,6 +93,22 @@ Gli avvisi di sync fallita o ripristinata vanno solo ai destinatari senza filtri
 inviata compare nel log (`notifica voti → notify.…: 🎓 Voto – …`, solo il titolo). Verifica con
 `uv run pocs/07_notify.py`, che controlla ogni servizio e, se un nome non esiste, elenca quelli
 disponibili; con `--scrivi` manda una prova a tutti.
+
+**Telegram.** Crea un bot con **@BotFather** (`/newbot`): ti dà il token. Per il `chat_id`: apri il
+bot e premi *Avvia* (chat privata) oppure aggiungilo a un gruppo e scrivi un messaggio, poi apri
+`https://api.telegram.org/bot<TOKEN>/getUpdates` e prendi `"chat":{"id": …}` (nei gruppi è negativo).
+Come per Home Assistant, `chat_id` riceve tutto e altre chat si aggiungono con filtri facoltativi:
+```toml
+[notifiche.telegram]
+bot_token = "123456:ABC…"     # o variabile TELEGRAM_BOT_TOKEN
+chat_id = "123456789"         # tutto, compresi gli avvisi di sync fallita
+[[notifiche.telegram.destinatari]]
+chat_id = "-1001234567890"    # es. gruppo di famiglia
+tipi = ["voti"]
+```
+I messaggi passano dai server di Telegram, voti compresi. Nel log gli id delle chat sono abbreviati
+(`telegram:…7890`) e il token non compare mai. Verifica con `uv run pocs/07_notify.py --solo telegram`
+(controlla il bot e ogni chat), `--scrivi` per un messaggio di prova.
 
 Le notifiche di bacheca con un allegato archiviato portano il link: toccando la notifica si
 apre il file su Drive o Nextcloud (non Home Assistant); tenendola premuta compare il pulsante "Apri allegato".
@@ -441,7 +460,9 @@ Take the slots from the school timetable (school circular or website):
 Argo passwords (one variable per `password_env`), `HA_TOKEN` (Home Assistant long-lived token),
 `TELEGRAM_BOT_TOKEN`, and for attachments on Nextcloud `NEXTCLOUD_APP_PASSWORD` (plus the optional
 `NEXTCLOUD_URL` and `NEXTCLOUD_USER`): in `.env` for local use (see `.env.example`), in the stack's
-*Environment variables* in Portainer.
+*Environment variables* in Portainer. If you can't add variables to the container, `HA_TOKEN` and the
+Telegram token can also go in the config (`token` in `[notifiche.homeassistant]`, `bot_token` in
+`[notifiche.telegram]`): an empty variable counts as unset.
 
 #### Notifications
 What gets notified is set by `[notifiche] tipi` (or `notifiche = [...]` on a single pupil). Values:
@@ -464,6 +485,22 @@ Sync failed/recovered alerts go only to recipients without filters. Every notifi
 logged (`notifica voti → notify.…: 🎓 Voto – …`, title only). Check with `uv run pocs/07_notify.py`,
 which checks every service and lists the available ones if a name is wrong; `--scrivi` sends a test
 to all of them.
+
+**Telegram.** Create a bot with **@BotFather** (`/newbot`), which gives you the token. For the
+`chat_id`: open the bot and press *Start* (private chat) or add it to a group and send a message, then
+open `https://api.telegram.org/bot<TOKEN>/getUpdates` and take `"chat":{"id": …}` (negative for groups).
+As for Home Assistant, `chat_id` receives everything and more chats can be added with optional filters:
+```toml
+[notifiche.telegram]
+bot_token = "123456:ABC…"     # or the TELEGRAM_BOT_TOKEN variable
+chat_id = "123456789"         # everything, sync failure alerts included
+[[notifiche.telegram.destinatari]]
+chat_id = "-1001234567890"    # e.g. family group
+tipi = ["voti"]
+```
+Messages go through Telegram's servers, grades included. In the log chat ids are shortened
+(`telegram:…7890`) and the token never appears. Check with `uv run pocs/07_notify.py --solo telegram`
+(checks the bot and every chat), `--scrivi` for a test message.
 
 Notice board notifications whose attachment is archived carry its link: tapping the notification
 opens the file in Drive or Nextcloud (not Home Assistant); long-press shows an "Apri allegato" button.
