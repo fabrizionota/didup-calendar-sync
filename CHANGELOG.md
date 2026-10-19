@@ -8,11 +8,21 @@
 
 Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabrizionota/didup-calendar-sync:AAAA.MM.GG`.
 
+### 2026.10.15
+- Errori temporanei di Argo (HTTP 500/502/503/504, timeout, rete): la richiesta viene ripetuta nello
+  stesso giro, `[rete] tentativi` (3) con attesa crescente da `attesa_secondi` (30 s, poi 90 s).
+  Esauriti i tentativi, il resto del giro di quell'account non riprova.
+- Avviso di sync fallita solo dopo `[notifiche] dopo_fallimenti` giri falliti di fila (default 2);
+  il ripristino si notifica solo se l'avviso era partito. `/healthz` e Kuma restano immediati.
+- Log: gli errori noti di Argo stanno in una riga (`HTTP 500 su login`), senza traceback né pagina
+  HTML; la notifica di errore riporta la stessa descrizione.
+
 ### 2026.10.14
 - Monitoraggio: endpoint `/metrics` per Prometheus (giri, durata, eventi, notifiche, allegati,
   elementi visti per tipo, versione dell'app Argo) e `/healthz` (200/503), attivi con `METRICS_PORT`
   (9105 nel compose, pubblicata solo su localhost: `METRICS_BIND`). Solo libreria standard.
-- Uptime Kuma: push a fine giro (`up` con durata, `down` con l'errore) con `KUMA_PUSH_URL`.
+- Uptime Kuma: push a fine giro (`up` con durata, `down` con l'errore) con `KUMA_PUSH_URL`, oppure
+  `[monitoraggio] kuma_push_url` nel config (anche `porta`): le variabili d'ambiente vincono.
 - `deploy/compose.monitoraggio.yml`: reti Docker di Prometheus e Kuma configurabili
   (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
 - Regole Prometheus d'esempio nel README, compreso il controllo di plausibilità sulle lezioni.
@@ -45,12 +55,22 @@ Le versioni sono date (`AAAA.MM.GG`): tag `vAAAA.MM.GG`, immagine `ghcr.io/fabri
 
 Versions are dates (`YYYY.MM.DD`): tag `vYYYY.MM.DD`, image `ghcr.io/fabrizionota/didup-calendar-sync:YYYY.MM.DD`.
 
+### 2026.10.15
+- Temporary Argo errors (HTTP 500/502/503/504, timeouts, network): the request is retried within the
+  same run, `[rete] tentativi` (3) with a growing wait from `attesa_secondi` (30 s, then 90 s).
+  Once retries are exhausted, the rest of that account's run doesn't retry.
+- Sync failed alert only after `[notifiche] dopo_fallimenti` failed runs in a row (default 2); the
+  recovery is notified only if the alert went out. `/healthz` and Kuma stay immediate.
+- Logs: known Argo errors fit on one line (`HTTP 500 su login`), with no traceback or HTML page;
+  the error notification carries the same description.
+
 ### 2026.10.14
 - Monitoring: `/metrics` endpoint for Prometheus (runs, duration, events, notifications,
   attachments, items seen per type, Argo app version) and `/healthz` (200/503), enabled by
   `METRICS_PORT` (9105 in the compose, published on localhost only: `METRICS_BIND`). Standard
   library only.
-- Uptime Kuma: push after each run (`up` with duration, `down` with the error) via `KUMA_PUSH_URL`.
+- Uptime Kuma: push after each run (`up` with duration, `down` with the error) via `KUMA_PUSH_URL`, or
+  `[monitoraggio] kuma_push_url` in the config (also `porta`): environment variables win.
 - `deploy/compose.monitoraggio.yml`: configurable Prometheus and Kuma Docker networks
   (`PROMETHEUS_NETWORK`, `KUMA_NETWORK`).
 - Example Prometheus rules in the README, including the plausibility check on lessons.
