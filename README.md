@@ -348,6 +348,9 @@ Dettagli in [pocs/README.md](pocs/README.md).
 - Se la sync fallisce arriva **una** notifica di errore, solo dopo `[notifiche] dopo_fallimenti`
   giri falliti di fila (default 2: un disservizio breve di Argo non disturba), e una quando torna
   a funzionare. `/healthz` e Uptime Kuma segnalano invece subito ogni giro fallito.
+- Token Google scaduto o revocato (`invalid_grant`): una riga nel log con cosa fare e notifica
+  subito, senza aspettare `dopo_fallimenti`, perché non si risolve da solo. Se capita ogni 7 giorni
+  l'app OAuth è ancora in stato *Test* (vedi Setup Google).
 - `argo-client-version` viene letto dall'App Store a ogni giro, per evitare il 410 da client obsoleto.
 - All'avvio il log mostra la versione e una riga per alunno con notifiche attive e archivio degli
   allegati, es. `didup-calendar-sync 2026.10.13-abc1234 …` e `config /data/config.toml: Anna
@@ -689,6 +692,9 @@ how the main script interprets the same data. Details (in Italian) in [pocs/READ
 - When a sync fails you get **one** error notification, only after `[notifiche] dopo_fallimenti`
   failed runs in a row (default 2: a short Argo outage doesn't bother you), and one when it
   recovers. `/healthz` and Uptime Kuma report every failed run right away instead.
+- Expired or revoked Google token (`invalid_grant`): one log line saying what to do and an
+  immediate notification, without waiting for `dopo_fallimenti`, since it won't fix itself. If it
+  happens every 7 days the OAuth app is still in *Testing* status (see Google setup).
 - `argo-client-version` is read from the App Store on every run, to avoid the 410 for outdated clients.
 - At startup the log shows the version and one line per pupil with active notifications and the
   attachment archive, e.g. `didup-calendar-sync 2026.10.13-abc1234 …` and `config /data/config.toml:
