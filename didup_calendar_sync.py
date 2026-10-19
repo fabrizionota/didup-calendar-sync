@@ -278,6 +278,10 @@ class SyncFallita(RuntimeError):
     """Uno o più account non sincronizzati: i dettagli sono già nel log, una riga per account."""
 
 
+class TokenGoogleNonValido(RuntimeError):
+    """Token Google assente, scaduto o revocato: non si risolve da solo, serve rifare il login."""
+
+
 class MultiProfiloClient(DiDUPClient):
     """didupwrapper usa solo il primo profilo del login: qui li teniamo tutti.
     Le richieste con errori temporanei vengono ripetute (tentativi, attesa crescente); se un
@@ -772,12 +776,21 @@ def google_creds(cfg: dict, interactive: bool = False):
     token = Path(g["token_file"])
     creds = Credentials.from_authorized_user_file(str(token)) if token.exists() else None
     if creds and creds.expired and creds.refresh_token and not interactive:
-        creds.refresh(Request())
+        from google.auth.exceptions import RefreshError
+        try:
+            creds.refresh(Request())
+        except RefreshError as e:
+            motivo = e.args[0] if e.args else str(e)
+            raise TokenGoogleNonValido(
+                f"token Google scaduto o revocato ({short(str(motivo), 120)}): rifai il login con "
+                f"pocs/04_google_auth.py --login e sostituisci {token} (README, Setup Google). Se "
+                f"succede ogni 7 giorni, l'app OAuth è ancora in stato Test: pubblicala") from None
         token.write_text(creds.to_json())
     if creds and creds.valid and not interactive:
         return creds
     if not interactive:
-        raise RuntimeError(f"Token Google assente o non valido ({token}): esegui --auth")
+        raise TokenGoogleNonValido(f"token Google assente o non valido ({token}): rifai il login con "
+                                   f"pocs/04_google_auth.py --login (README, Setup Google)")
     from google_auth_oauthlib.flow import InstalledAppFlow
     flow = InstalledAppFlow.from_client_secrets_file(g["client_secret_file"], scope_richiesti(cfg))
     creds = flow.run_local_server(port=0, prompt="consent", access_type="offline")
@@ -1591,17 +1604,20 @@ def main() -> None:
 
     soglia = cfg["notifiche"]["dopo_fallimenti"]
     while True:
-        inizio, errore = time.time(), None
+        inizio, errore, soglia_giro = time.time(), None, soglia
         try:
             asyncio.run(run_once(cfg, args, state, notifier))
         except SyncFallita as e:       # account già descritti nel log, una riga ciascuno
             errore = short(str(e), 300)
             log.error("Sync fallita: %s", errore)
+        except TokenGoogleNonValido as e:  # non passa da solo: avviso subito, senza traceback
+            errore, soglia_giro = str(e), 1
+            log.error("Sync fallita: %s", errore)
         except Exception as e:  # noqa: BLE001
             log.exception("Sync fallita")
             errore = descrivi_errore(e)
         if not una_tantum:
-            aggiorna_errori(state, notifier, errore, soglia)
+            aggiorna_errori(state, notifier, errore, soglia_giro)
         fine = time.time()
         if not una_tantum:
             registra_giro(inizio, fine, errore is None)
