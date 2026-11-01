@@ -48,6 +48,7 @@ max_per_giro = 30      # i primi giri recuperano gli allegati già pubblicati, a
 # che la usano vengono saltate e il file tiene il nome originale. Cambiarli non sposta i file già caricati.
 percorso = "{cartella}/{alunno}/{anno}/{mese:02d} - {nome_mese}"
 nome_file = "{data} {nome}"
+comunicazioni_pdf = true   # comunicazioni senza allegati archiviate come PDF (link nella notifica)
 
 [allegati.nextcloud]
 url = "https://cloud.esempio.it"   # o variabile NEXTCLOUD_URL

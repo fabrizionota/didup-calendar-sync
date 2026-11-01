@@ -17,12 +17,26 @@ Funziona con più figli e più scuole: ogni alunno ha il suo account Argo.
 | Promemoria / verifiche | Eventi con orario; giornalieri se Argo non dà l'ora (`00:00`) |
 | Bacheca con adesione (`dataScadAdesione`) | Evento giornaliero di scadenza. `dataScadenza` è la fine pubblicazione della circolare e viene ignorata |
 | Allegati della bacheca (facoltativo) | PDF archiviati su **Google Drive** o **Nextcloud** in `Scuola/<alunno>/<anno>/<MM - Mese>/`; il link apre il file dalla notifica e dall'evento di scadenza |
-| Voti, bacheca, note, promemoria (+ opz. assenze, compiti) | Notifiche Home Assistant e/o Telegram, solo per le novità |
+| Comunicazioni della bacheca senza allegati | Archiviate anche loro come **PDF** (data, autore, richieste, testo completo), nella stessa cartella |
+| Voti, bacheca, note, promemoria (+ opz. assenze, compiti) | Notifiche Home Assistant e/o Telegram, solo per le novità; su Telegram le comunicazioni con il testo intero |
 
 > **Progetto non ufficiale**, non affiliato né approvato da Argo Software. Usa API non documentate
 > dell'app Argo didUP Famiglia, che possono cambiare senza preavviso; ognuno lo usa con le proprie
 > credenziali e sotto la propria responsabilità. Licenza [MIT](LICENSE), privacy in [PRIVACY.md](PRIVACY.md),
 > termini di servizio in [TERMS.md](TERMS.md).
+
+### Come funziona
+Ogni 30 minuti (`SYNC_INTERVAL`) il programma entra in Argo con le credenziali del genitore, usando
+le **API non documentate dell'app didUP Famiglia**: login dall'SSO di Argo (OAuth2/PKCE) e poi gli
+endpoint REST dell'app (`www.portaleargo.it/appfamiglia/api/rest/`), tramite la libreria open
+source [`didupwrapper`](https://pypi.org/project/didupwrapper/). Scarica la *dashboard* (voti,
+bacheca, note, promemoria, compiti, assenze) e l'orario dei giorni successivi.
+
+Ogni elemento riceve una chiave univoca (per i voti: materia + giorno + progressivo); le chiavi già
+viste stanno in `data/state.json`, così a ogni giro si notificano solo le novità, con le API di
+Home Assistant e/o la Bot API di Telegram. Lezioni, compiti e scadenze vanno su Google Calendar e
+allegati e comunicazioni su Drive (API ufficiali Google, OAuth) o Nextcloud (WebDAV). Su Argo il
+programma è in sola lettura: non segna mai presa visione né adesione.
 
 ### Come è fatto
 ```
@@ -36,6 +50,7 @@ tests/                     test offline, nessun account necessario
 pocs/                      script esplorativi per verificare ogni integrazione (vedi pocs/README.md)
 deploy/compose.yml         installazione con Docker Compose (o stack Portainer)
 .github/workflows/ci.yml   CI: test, immagine multi-arch su GHCR
+.gitea/workflows/ci.yml    CI per un Gitea self-hosted: immagini di prova sha-<commit> nel suo registry
 LICENSE, SECURITY.md       licenza MIT, segnalazioni di sicurezza
 PRIVACY.md, TERMS.md       informativa privacy (GDPR), termini di servizio
 ```
@@ -79,6 +94,11 @@ Cosa notificare si sceglie con `[notifiche] tipi` (o `notifiche = [...]` nel sin
 `["voti", "bacheca", "note", "promemoria"]`: i compiti sono già nel calendario, quindi non vengono
 notificati se non li aggiungi.
 
+La notifica di un voto riporta anche la **media della materia** e la **media generale**
+(`📊 media matematica: 7,25 · media generale: 8,00`), prese dai dati di Argo come nell'app; se Argo
+non le dà, sono calcolate dai voti numerici che fanno media (esclusi giudizi e voti "non fa media").
+Sono arrotondate al quarto di voto più vicino (7,25 · 7,50 · 7,75 · 8,00).
+
 `[notifiche.homeassistant]`: `url` (va bene l'IP interno, es. `http://192.168.1.x:8123`) e `service`,
 il nome del servizio notify del telefono, es. `mobile_app_<telefono>` (il prefisso `notify.` è
 accettato), che riceve tutto. Altri telefoni si aggiungono come destinatari, ognuno con filtri
@@ -106,7 +126,9 @@ chat_id = "123456789"         # tutto, compresi gli avvisi di sync fallita
 chat_id = "-1001234567890"    # es. gruppo di famiglia
 tipi = ["voti"]
 ```
-I messaggi passano dai server di Telegram, voti compresi. Nel log gli id delle chat sono abbreviati
+Su Telegram le comunicazioni della bacheca arrivano con il **testo intero** (oltre il limite di
+Telegram divise in più messaggi, 1/3, 2/3…), mentre Home Assistant riceve il riassunto: la chat
+diventa lo storico delle comunicazioni, accanto ai PDF archiviati. I messaggi passano dai server di Telegram, voti compresi. Nel log gli id delle chat sono abbreviati
 (`telegram:…7890`) e il token non compare mai. Verifica con `uv run pocs/07_notify.py --solo telegram`
 (controlla il bot e ogni chat), `--scrivi` per un messaggio di prova.
 
@@ -129,6 +151,13 @@ Nextcloud, così cambiando archivio quello nuovo recupera tutto) e una propriet�
 che evita doppioni anche se `state.json` va perso. Al primo avvio vengono recuperati anche gli
 allegati già pubblicati, al massimo `max_per_giro` per giro. Un errore su un allegato non ferma la
 sync: viene riprovato al giro dopo.
+
+Le **comunicazioni senza allegati** (solo testo) vengono archiviate come PDF, nella stessa cartella e
+con lo stesso nome degli allegati (`{nome}` è l'inizio del testo, senza "Oggetto:"). Il PDF riporta
+alunno, data, autore, categoria, presa visione o adesione richieste, l'eventuale link e il testo
+completo; il suo link va nella notifica, così ogni comunicazione ha un documento archiviato. Si
+disattiva con `comunicazioni_pdf = false`. Il PDF è generato senza librerie esterne, con un font a
+larghezza fissa: i caratteri fuori da Windows-1252 (es. emoji) diventano `?`.
 
 **Cartelle e nomi** si decidono con `percorso` e `nome_file`; i default danno:
 ```
@@ -334,7 +363,9 @@ GitHub Actions esegue i test a ogni push e pull request. Un push su `main` pubbl
 
 Per una copia ospitata su Gitea o Forgejo c'è `.gitea/workflows/ci.yml`: stessi test e immagine nel
 registry dell'istanza (`edge`, `sha-<commit>` a ogni push, versione e `latest` sui tag), con il
-secret `REGISTRY_TOKEN`.
+secret `REGISTRY_TOKEN`. Con il secret facoltativo `PORTAINER_WEBHOOK`, dopo ogni push su `main` la
+CI chiama il webhook di uno stack Portainer che usa `:edge` con `pull_policy: always`: unire una PR
+basta a mettere in produzione la nuova versione.
 
 ### Test
 ```bash
@@ -359,11 +390,19 @@ Dettagli in [pocs/README.md](pocs/README.md).
   passati restano come storico.
 - Protezione: se in un giro Argo non restituisce nulla, o sparirebbero più di metà degli eventi
   esistenti (e più di 10), la cancellazione viene saltata.
-- Errori temporanei di Argo (HTTP 500/502/503/504, timeout, rete): la richiesta viene ripetuta nello
+- Errori temporanei di Argo (HTTP 500/502/503/504, timeout, rete, login SSO interrotto a metà dopo
+  aver accettato le credenziali): la richiesta viene ripetuta nello
   stesso giro (`[rete] tentativi = 3`, attesa `attesa_secondi = 30` triplicata a ogni tentativo:
   30 s, 90 s). Se l'errore persiste l'account viene saltato fino al giro successivo e nel log c'è
   una sola riga, es. `[SC12345] sync fallita, Argo non raggiungibile: HTTP 500 su login`, senza
-  traceback (che resta per gli errori inattesi).
+  traceback (che resta per gli errori inattesi; con `-v` compare anche per quelli noti).
+- Login Argo rifiutato: l'SSO risponde con una pagina invece del redirect. Il log riporta gli avvisi
+  di quella pagina (`Argo: login SSO rifiutato (…)`, mai i campi del modulo né le credenziali) e il
+  login viene ritentato **una sola volta** dopo 60 s, per non rischiare il blocco dell'account. Se
+  fallisce ancora: `login Argo fallito: … (Argo: …)`. Se capita una volta è di solito un intoppo
+  dell'SSO di Argo; se si ripete,
+  entra con quell'account nell'app Argo Famiglia (password scaduta, richiesta da completare) e
+  controlla le credenziali.
 - Se la sync fallisce arriva **una** notifica di errore, solo dopo `[notifiche] dopo_fallimenti`
   giri falliti di fila (default 2: un disservizio breve di Argo non disturba), e una quando torna
   a funzionare. `/healthz` e Uptime Kuma segnalano invece subito ogni giro fallito.
@@ -405,12 +444,26 @@ its own Argo account.
 | Reminders / tests (promemoria) | Timed events; all-day when Argo gives no time (`00:00`) |
 | Notice board items requiring sign-up (`dataScadAdesione`) | All-day deadline event. `dataScadenza` is just the end of the notice's publication and is ignored |
 | Notice board attachments (optional) | PDFs archived on **Google Drive** or **Nextcloud** in `Scuola/<pupil>/<year>/<MM - Month>/`; the link opens the file from the notification and from the deadline event |
-| Grades, notice board, disciplinary notes, reminders (+ optional absences, homework) | Home Assistant and/or Telegram notifications, only for new items |
+| Notice board messages without attachments | Archived as **PDF** too (date, author, requests, full text), in the same folder |
+| Grades, notice board, disciplinary notes, reminders (+ optional absences, homework) | Home Assistant and/or Telegram notifications, only for new items; on Telegram notices come with their full text |
 
 > **Unofficial project**, not affiliated with or endorsed by Argo Software. It uses undocumented APIs
 > of the Argo didUP Famiglia app, which may change without notice; everyone uses it with their own
 > credentials and at their own risk. [MIT](LICENSE) licence, privacy in [PRIVACY.md](PRIVACY.md),
 > terms of service in [TERMS.md](TERMS.md).
+
+### How it works
+Every 30 minutes (`SYNC_INTERVAL`) the program logs into Argo with the parent's credentials, using
+the **undocumented APIs of the didUP Famiglia app**: login through Argo's SSO (OAuth2/PKCE), then
+the app's REST endpoints (`www.portaleargo.it/appfamiglia/api/rest/`), via the open source
+[`didupwrapper`](https://pypi.org/project/didupwrapper/) library. It downloads the *dashboard*
+(grades, notice board, notes, reminders, homework, absences) and the timetable of the next days.
+
+Every item gets a unique key (for grades: subject + day + sequence number); keys already seen live
+in `data/state.json`, so each run notifies only new items, through the Home Assistant API and/or the
+Telegram Bot API. Lessons, homework and deadlines go to Google Calendar, and attachments and notices
+to Drive (official Google APIs, OAuth) or Nextcloud (WebDAV). On Argo the program is read-only: it
+never sets read receipts or sign-ups.
 
 ### Layout
 ```
@@ -424,6 +477,7 @@ tests/                     offline tests, no account needed
 pocs/                      exploratory scripts to check each integration (see pocs/README.md)
 deploy/compose.yml         Docker Compose install (or Portainer stack)
 .github/workflows/ci.yml   CI: tests, multi-arch image on GHCR
+.gitea/workflows/ci.yml    CI for a self-hosted Gitea: sha-<commit> test images in its registry
 LICENSE, SECURITY.md       MIT licence, security reports
 PRIVACY.md, TERMS.md       privacy notice (GDPR), terms of service
 ```
@@ -471,6 +525,11 @@ What gets notified is set by `[notifiche] tipi` (or `notifiche = [...]` on a sin
 `["voti", "bacheca", "note", "promemoria"]`: homework is already in the calendar, so it is not
 notified unless you add it.
 
+A grade notification also shows the **subject average** and the **overall average**
+(`📊 media matematica: 7,25 · media generale: 8,00`), taken from Argo's data as in the app; if Argo
+does not provide them, they are computed from the numeric grades that count (no judgements, no
+"does not count" grades). They are rounded to the nearest quarter (7,25 · 7,50 · 7,75 · 8,00).
+
 `[notifiche.homeassistant]`: `url` (the internal IP is fine, e.g. `http://192.168.1.x:8123`) and
 `service`, the phone's notify service, e.g. `mobile_app_<phone>` (a `notify.` prefix is accepted),
 which receives everything. More phones are added as recipients, each with optional filters by type
@@ -498,7 +557,9 @@ chat_id = "123456789"         # everything, sync failure alerts included
 chat_id = "-1001234567890"    # e.g. family group
 tipi = ["voti"]
 ```
-Messages go through Telegram's servers, grades included. In the log chat ids are shortened
+On Telegram notice board messages arrive with their **full text** (split into several messages
+over Telegram's limit, 1/3, 2/3…), while Home Assistant gets the summary: the chat becomes the
+history of notices, alongside the archived PDFs. Messages go through Telegram's servers, grades included. In the log chat ids are shortened
 (`telegram:…7890`) and the token never appears. Check with `uv run pocs/07_notify.py --solo telegram`
 (checks the bot and every chat), `--scrivi` for a test message.
 
@@ -521,6 +582,13 @@ switching archive re-uploads everything to the new one) and by an `argo_key` pro
 which prevents duplicates even if `state.json` is lost. The first runs also fetch attachments already
 published, at most `max_per_giro` per run. A failure on one attachment does not stop the sync: it is
 retried at the next run.
+
+**Notices without attachments** (text only) are archived as a PDF, in the same folder and with the
+same naming as attachments (`{nome}` is the start of the text, without "Oggetto:"). The PDF shows
+pupil, date, author, category, requested read receipt or sign-up, any link and the full text; its
+link goes into the notification, so every notice has an archived document. Turn it off with
+`comunicazioni_pdf = false`. The PDF is generated without external libraries, with a fixed-width
+font: characters outside Windows-1252 (e.g. emoji) become `?`.
 
 **Folders and names** are set by `percorso` and `nome_file`; the defaults give:
 ```
@@ -700,7 +768,9 @@ image; a `vYYYY.MM.DD` tag publishes `YYYY.MM.DD` and `latest`. The version is l
 
 For a copy hosted on Gitea or Forgejo there is `.gitea/workflows/ci.yml`: same tests and an image in
 the instance registry (`edge`, `sha-<commit>` on every push, version and `latest` on tags), with the
-`REGISTRY_TOKEN` secret.
+`REGISTRY_TOKEN` secret. With the optional `PORTAINER_WEBHOOK` secret, after every push to `main` the
+CI calls the webhook of a Portainer stack using `:edge` with `pull_policy: always`: merging a PR is
+enough to put the new version in production.
 
 ### Tests
 ```bash
@@ -721,11 +791,18 @@ how the main script interprets the same data. Details (in Italian) in [pocs/READ
 - Homework: a change by the teacher updates the lesson (or the 📚 event); past 📚 events stay as history.
 - Safety net: if Argo returns nothing in a run, or more than half of the existing events (and more
   than 10) would disappear, deletion is skipped.
-- Temporary Argo errors (HTTP 500/502/503/504, timeouts, network): the request is retried within
+- Temporary Argo errors (HTTP 500/502/503/504, timeouts, network, SSO login broken off after the
+  credentials were accepted): the request is retried within
   the same run (`[rete] tentativi = 3`, wait `attesa_secondi = 30` tripled on every attempt: 30 s,
   90 s). If the error persists the account is skipped until the next run and the log gets a single
   line, e.g. `[SC12345] sync fallita, Argo non raggiungibile: HTTP 500 su login`, with no traceback
-  (kept for unexpected errors).
+  (kept for unexpected errors; with `-v` it is shown for known ones too).
+- Argo login rejected: the SSO answers with a page instead of a redirect. The log shows that page's
+  alerts (`Argo: login SSO rifiutato (…)`, never form fields or credentials) and the login is retried
+  **only once** after 60 s, so the account doesn't get locked. If it fails again:
+  `login Argo fallito: … (Argo: …)`. A one-off is usually an Argo SSO hiccup; if it repeats, log in
+  with that account in the
+  Argo Famiglia app (expired password, pending request) and check the credentials.
 - When a sync fails you get **one** error notification, only after `[notifiche] dopo_fallimenti`
   failed runs in a row (default 2: a short Argo outage doesn't bother you), and one when it
   recovers. `/healthz` and Uptime Kuma report every failed run right away instead.

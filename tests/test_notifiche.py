@@ -123,7 +123,7 @@ class TestNotifyNew(unittest.TestCase):
         ricevute = []
 
         class N:
-            def send(self, title, message, url=None, kind=None, alunno=None):
+            def send(self, title, message, url=None, kind=None, alunno=None, **kw):
                 ricevute.append((kind, alunno, title))
         st = m.State(Path("/nonexistent/state.json"))
         m.notify_new(snap(), "x", "Test", st, N(), ["voti", "bacheca"])

@@ -4,6 +4,9 @@ name: ci
 # Test a ogni push; immagine nel registry della stessa istanza Gitea:
 #   tag vAAAA.MM.GG → :AAAA.MM.GG e :latest     main → :edge     ogni push → :sha-<7 caratteri>
 # Serve il secret REGISTRY_TOKEN (token con write:package dell'utente che fa il push).
+# Facoltativo il secret PORTAINER_WEBHOOK (webhook di uno stack che usa :edge con pull_policy: always):
+# dopo il push di :edge da main la CI lo chiama e Portainer scarica la nuova immagine e riavvia.
+# Usa l'IP dell'host di Portainer, non un nome .local che il runner non risolve.
 # Facoltativa la variabile REGISTRY (es. git.example.org): se il runner vede Gitea con un indirizzo
 # interno, gitea.server_url non è il nome pubblico del registry.
 on:
@@ -57,3 +60,11 @@ jobs:
             docker push "$t"
           done
           docker logout "${{ steps.v.outputs.registry }}"
+
+      - name: Deploy (webhook Portainer)
+        if: github.ref == 'refs/heads/main'
+        env:
+          PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK }}
+        run: |
+          if [ -z "$PORTAINER_WEBHOOK" ]; then echo "PORTAINER_WEBHOOK non impostato: niente deploy automatico"; exit 0; fi
+          curl -fsS -X POST --max-time 120 "$PORTAINER_WEBHOOK" -o /dev/null -w "Portainer: HTTP %{http_code}\n"

@@ -102,9 +102,32 @@ class TestInvioTelegram(unittest.TestCase):
         self.assertIn("telegram:…1111, telegram:…2222", cm.output[0])   # id mascherati nel log
         self.assertNotIn("111111111", "".join(cm.output))
 
-    def test_testo_troppo_lungo_troncato(self):
-        self.n.send("T", "x" * 5000, kind="voti", alunno="B")
-        self.assertLessEqual(len(self.tg.inviati[0][2]), 4000)
+    def test_testo_lungo_diviso_senza_perdite(self):
+        paragrafi = [f"Paragrafo {i}: " + "parola " * 80 for i in range(20)]   # ~11.000 caratteri
+        self.n.send("T", "\n\n".join(paragrafi), url="https://x/pdf", kind="voti", alunno="B")
+        testi = [t for _, chat, t in self.tg.inviati if chat == "111111111"]
+        self.assertEqual(len(testi), 3)
+        self.assertTrue(all(len(t) <= 4000 for t in testi))
+        self.assertTrue(testi[0].endswith("(1/3)") and testi[2].endswith("https://x/pdf (3/3)"))
+        unito = " ".join(t.rsplit(" (", 1)[0] for t in testi)
+        for p in paragrafi:
+            self.assertIn(p.strip(), unito)                  # nessun pezzo perso
+        self.assertFalse(any(t.split("\n")[0].endswith("parol") for t in testi))  # tagli tra parole
+
+    def test_testo_completo_solo_a_telegram(self):
+        ha = []
+
+        def gestisci(req):
+            if req.url.host == "api.telegram.org":
+                return self.tg.transport().handle_request(req)
+            ha.append(json.loads(req.content)["message"])
+            return httpx.Response(200, json={})
+        cfg = config(TG + '\n[notifiche.homeassistant]\nurl = "http://ha"\nservice = "tel"\ntoken = "t"\n')
+        n = m.Notifier(cfg["notifiche"], False, transport=httpx.MockTransport(gestisci))
+        with self.assertLogs(m.log, "INFO"):
+            n.send("📢 Bacheca – A", "Dir: inizio…", kind="bacheca", alunno="A", completo="Dir\n\ntesto intero")
+        self.assertEqual(ha, ["Dir: inizio…"])
+        self.assertIn("📢 Bacheca – A\nDir\n\ntesto intero", [t for _, _, t in self.tg.inviati])
 
     def test_errore_senza_token_nel_log_e_metrica(self):
         m.METRICHE = m.Metriche()
@@ -137,3 +160,30 @@ class TestInvioTelegram(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDestinatariDoppi(unittest.TestCase):
+    DOPPIO = f"""
+[notifiche.telegram]
+bot_token = "{TOKEN}"
+chat_id = "-1005550001234"
+[[notifiche.telegram.destinatari]]
+chat_id = "-1005550001234"
+tipi = ["voti", "bacheca"]
+"""
+
+    def test_avviso_all_avvio(self):
+        with self.assertLogs(m.log, "WARNING") as cm:
+            config(self.DOPPIO)
+        self.assertIn("[notifiche.telegram]: telegram:…1234 compare 2 volte (una volta senza filtri", cm.output[0])
+        self.assertNotIn("1005550001234", cm.output[0])
+
+    def test_un_solo_invio_per_chat(self):
+        with self.assertLogs(m.log, "WARNING"):
+            n = m.Notifier(config(self.DOPPIO)["notifiche"], True)
+        self.assertEqual(n.chat("voti", "A"), ["-1005550001234"])
+        self.assertEqual(n.chat(None, None), ["-1005550001234"])     # senza filtri: anche gli avvisi di sistema
+
+    def test_nessun_avviso_se_non_ripetuto(self):
+        with self.assertNoLogs(m.log, "WARNING"):
+            config()

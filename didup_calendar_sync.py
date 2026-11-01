@@ -41,6 +41,10 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote
 from collections import Counter
+from html import unescape
+from html.parser import HTMLParser
+from types import SimpleNamespace
+import textwrap
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from xml.sax.saxutils import escape
 
@@ -49,7 +53,8 @@ from didupwrapper import DiDUPClient
 from didupwrapper.client import (  # privati: versione fissata
     _DASHBOARD_PATH, _DATA_INIZIO_DEFAULT, _LOGIN_PATH, _estrai_dashboard, _random_string)
 from didupwrapper.models import DashboardResponse
-from didupwrapper.exceptions import DiDUPError
+from didupwrapper.exceptions import AuthError, DiDUPError
+import didupwrapper.auth as _auth_argo
 
 log = logging.getLogger("didup-calendar")
 
@@ -112,6 +117,9 @@ def load_config(path: Path) -> dict:
     al_cfg.setdefault("max_per_giro", 30)    # quanti allegati caricare al massimo per giro
     al_cfg.setdefault("percorso", PERCORSO_DEFAULT)    # cartelle, dai segnaposto in SEGNAPOSTO
     al_cfg.setdefault("nome_file", NOME_FILE_DEFAULT)
+    al_cfg.setdefault("comunicazioni_pdf", True)  # comunicazioni senza allegati archiviate come PDF
+    if not isinstance(al_cfg["comunicazioni_pdf"], bool):
+        raise ValueError(f"[allegati] comunicazioni_pdf = {al_cfg['comunicazioni_pdf']!r}: true o false")
     nc = al_cfg.setdefault("nextcloud", {})
     nc.setdefault("password_env", "NEXTCLOUD_APP_PASSWORD")
     nc.setdefault("link", "interno")       # "interno" (/f/<id>, con login) | "pubblico" (condivisione)
@@ -178,6 +186,14 @@ def _destinatari(sezione: dict, chiave: str, nome: str, pulisci: Callable[[str],
                              f"{sorted(ignoti)} (ammessi: {', '.join(TIPI_NOTIFICA)})")
         out.append({chiave: ident, "tipi": list(tipi) if tipi is not None else None,
                     "alunni": list(d["alunni"]) if d.get("alunni") is not None else None})
+    for ident, n in Counter(d[chiave] for d in out).items():
+        if n > 1:  # quasi sempre un errore: chi è senza filtri riceve tutto, compresi gli avvisi di sistema
+            nome_dest = chat_mascherata(ident) if chiave == "chat_id" else f"notify.{ident}"
+            senza_filtri = any(d[chiave] == ident and d["tipi"] is None and d["alunni"] is None for d in out)
+            log.warning("[notifiche.%s]: %s compare %d volte%s. Tienilo in un posto solo: in testa alla "
+                        "sezione riceve tutto, in [[notifiche.%s.destinatari]] solo i tipi e gli alunni indicati",
+                        nome, nome_dest, n, " (una volta senza filtri: i filtri degli altri non valgono)"
+                        if senza_filtri else "", nome)
     return out
 
 
@@ -199,8 +215,8 @@ def chat_mascherata(chat_id: str) -> str:
 def filtra_destinatari(lista: list[dict], chiave: str, kind: str | None, alunno: str | None) -> list[str]:
     """Destinatari di questa notifica. Quelle di sistema (kind None: errori, ripristino) vanno solo
     a chi non ha filtri."""
-    return [d[chiave] for d in lista
-            if (d["tipi"] is None or kind in d["tipi"]) and (d["alunni"] is None or alunno in d["alunni"])]
+    return list(dict.fromkeys(d[chiave] for d in lista  # una volta sola anche se ripetuto nel config
+                              if (d["tipi"] is None or kind in d["tipi"]) and (d["alunni"] is None or alunno in d["alunni"])))
 
 
 def account_alunno(al: dict) -> dict:
@@ -281,13 +297,27 @@ def migra_state_key(state: "State", al: dict) -> None:
 ERRORI_RETE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError)
 
 
+# Errori di didupwrapper durante il login SSO dopo che le credenziali sono state accettate (o prima
+# di inviarle): è l'SSO di Argo che non risponde come previsto, non un problema di account.
+SSO_TEMPORANEI = ("Catena OAuth interrotta", "Avvio OAuth")
+
+
+def sso_temporaneo(e: BaseException) -> bool:
+    return isinstance(e, AuthError) and str(e.message or "").startswith(SSO_TEMPORANEI)
+
+
 def errore_temporaneo(e: BaseException) -> bool:
-    """Errori di Argo per cui ha senso riprovare: server in errore (HTTP 500/502/503/504) o rete."""
-    return isinstance(e, ERRORI_RETE) or (isinstance(e, DiDUPError) and e.status_code in (500, 502, 503, 504))
+    """Errori di Argo per cui ha senso riprovare: server in errore (HTTP 500/502/503/504), rete,
+    SSO interrotto a metà. Le credenziali rifiutate no (vedi MultiProfiloClient.login)."""
+    return (isinstance(e, ERRORI_RETE) or sso_temporaneo(e)
+            or (isinstance(e, DiDUPError) and not isinstance(e, AuthError) and e.status_code in (500, 502, 503, 504)))
 
 
 def descrivi_errore(e: BaseException) -> str:
     """Errore in una riga: niente pagine HTML di errore, niente URL con parametri."""
+    if isinstance(e, AuthError):     # l'HTTP qui confonde (l'SSO risponde 200 anche quando rifiuta)
+        testo = short(" ".join(str(e.message or "").split()), 300)
+        return ("login SSO di Argo interrotto: " if sso_temporaneo(e) else "login Argo fallito: ") + testo
     if isinstance(e, DiDUPError):
         dove = (e.request_url or "").split("?")[0].rstrip("/").rsplit("/", 1)[-1]
         testo = " ".join(str(e.message or "").split())
@@ -304,8 +334,136 @@ class SyncFallita(RuntimeError):
     """Uno o più account non sincronizzati: i dettagli sono già nel log, una riga per account."""
 
 
+def registra_errore_account(scuola: str, e: BaseException) -> None:
+    """Errori noti di Argo in una riga (traceback solo con -v); traceback completo per quelli inattesi."""
+    if errore_temporaneo(e):        # Argo giù o rete
+        log.error("[%s] sync fallita, Argo non raggiungibile: %s", scuola, descrivi_errore(e))
+    elif isinstance(e, AuthError):  # credenziali, password scaduta o richiesta di Argo da completare
+        log.error("[%s] sync fallita, %s. Se si ripete entra con questo account nell'app Argo "
+                  "Famiglia (password scaduta o richiesta da completare) e controlla le credenziali",
+                  scuola, descrivi_errore(e))
+    else:
+        log.exception("[%s] sync fallita", scuola)
+        return
+    log.debug("[%s] dettagli dell'errore", scuola, exc_info=e)
+
+
 class TokenGoogleNonValido(RuntimeError):
     """Token Google assente, scaduto o revocato: non si risolve da solo, serve rifare il login."""
+
+
+# --------------------------------------------------------------------------- #
+# Diagnosi del login SSO di Argo                                              #
+# --------------------------------------------------------------------------- #
+# Quando l'SSO rifiuta il login risponde 200 con una pagina invece del redirect, e didupwrapper
+# dice solo "credenziali errate o flusso cambiato". Per capire cosa dice davvero Argo teniamo il
+# testo degli avvisi di quella pagina (mai il modulo: niente credenziali).
+_SSO: dict[str, str | None] = {"avviso": None}
+
+
+class _AvvisiPagina(HTMLParser):
+    """Titolo e testo degli elementi che sembrano avvisi (classe/id con alert, error, …)."""
+    VUOTI = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "wbr"}
+    AVVISO = re.compile(r"alert|error|errore|feedback|messag|warning|avviso|notice", re.I)
+
+    def __init__(self):
+        super().__init__()
+        self.pila: list[bool] = []
+        self.titolo = False
+        self.pezzi: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "title":
+            self.titolo = True
+        if tag in self.VUOTI:
+            return
+        a = dict(attrs)
+        sospetto = tag not in ("script", "style") and bool(self.AVVISO.search(f"{a.get('class', '')} {a.get('id', '')} {a.get('role', '')}"))
+        self.pila.append(sospetto or bool(self.pila and self.pila[-1]))
+
+    def handle_endtag(self, tag):
+        if tag == "title":
+            self.titolo = False
+        if tag not in self.VUOTI and self.pila:
+            self.pila.pop()
+
+    def handle_data(self, data):
+        testo = " ".join(data.split())
+        if testo and (self.titolo or (self.pila and self.pila[-1])) and testo not in self.pezzi:
+            self.pezzi.append(testo)
+
+
+def avvisi_pagina(html: str) -> str:
+    p = _AvvisiPagina()
+    try:
+        p.feed(html)
+    except Exception:  # noqa: BLE001 - è solo diagnostica
+        pass
+    return short(" | ".join(p.pezzi), 200)
+
+
+class _LinkRedirectApp(HTMLParser):
+    """href del link ``data-auth-app-redirect`` della pagina "Autenticazione riuscita"."""
+
+    def __init__(self):
+        super().__init__()
+        self.href: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if self.href is None and "data-auth-app-redirect" in a and a.get("href"):
+            self.href = a["href"]
+
+
+def redirect_pagina_conferma(html: str, base: str) -> str | None:
+    """Da ottobre 2026 (TRAS-1928) l'SSO di Argo, dopo il consenso, invece del 302 mostra una pagina
+    "Autenticazione riuscita. Ti stiamo riportando all'applicazione…" che apre via JavaScript il link
+    ``data-auth-app-redirect`` (l'ultimo passaggio Hydra). Ne ricaviamo l'URL."""
+    p = _LinkRedirectApp()
+    try:
+        p.feed(html)
+    except Exception:  # noqa: BLE001
+        return None
+    if not p.href:
+        return None
+    from urllib.parse import urljoin
+    return urljoin(base, p.href)
+
+
+class _ClientSSO(httpx.AsyncClient):
+    """Il client che didupwrapper usa per l'SSO:
+    - pagina di conferma al posto del redirect: la trasforma in un 302 verso il link della pagina;
+    - POST delle credenziali non reindirizzato (login rifiutato): ne registra gli avvisi."""
+
+    async def request(self, method, url, *args, **kwargs):
+        r = await super().request(method, url, *args, **kwargs)
+        if method.upper() == "GET" and r.status_code == 200 and "location" not in r.headers:
+            try:
+                destinazione = redirect_pagina_conferma(r.text, str(r.request.url))
+            except Exception:  # noqa: BLE001
+                destinazione = None
+            if destinazione:
+                log.debug("SSO Argo: pagina di conferma, proseguo verso %s", destinazione.split("?")[0])
+                intestazioni = [(k, v) for k, v in r.headers.multi_items() if k.lower() == "set-cookie"]
+                return httpx.Response(302, headers=intestazioni + [("location", destinazione)],
+                                      request=r.request)
+        if method.upper() == "POST" and "location" not in r.headers:
+            try:
+                _SSO["avviso"] = avvisi_pagina(r.text) or f"pagina senza avvisi (HTTP {r.status_code})"
+            except Exception:  # noqa: BLE001
+                _SSO["avviso"] = None
+        return r
+
+
+class _HttpxSSO:
+    """httpx visto da didupwrapper.auth: uguale, tranne AsyncClient."""
+    AsyncClient = _ClientSSO
+
+    def __getattr__(self, nome):
+        return getattr(httpx, nome)
+
+
+_auth_argo.httpx = _HttpxSSO()
 
 
 class MultiProfiloClient(DiDUPClient):
@@ -315,7 +473,49 @@ class MultiProfiloClient(DiDUPClient):
 
     tentativi: int = 3
     attesa_secondi: int = 30
+    attesa_login: int = 60
     _riprova: bool = True
+
+    def _maschera(self, testo: str | None) -> str | None:
+        """Nessuna credenziale negli avvisi (se mai la pagina le riportasse)."""
+        cred = getattr(self._auth, "credenziali", None)
+        for v in (getattr(cred, "password", None), getattr(cred, "username", None)):
+            if testo and v and len(v) >= 3:
+                testo = testo.replace(v, "***")
+        return testo
+
+    async def login(self):
+        """- SSO interrotto a metà (credenziali già accettate): errore temporaneo di Argo, ritentato
+          come gli HTTP 5xx (``tentativi``, attesa crescente da ``attesa_secondi``).
+        - Credenziali rifiutate: un solo nuovo tentativo dopo ``attesa_login`` secondi (di solito è
+          un intoppo di Argo, e un tentativo in più non rischia il blocco dell'account)."""
+        rifiuti = interruzioni = 0
+        while True:
+            _SSO["avviso"] = None
+            try:
+                return await super().login()
+            except AuthError as e:
+                if sso_temporaneo(e):
+                    interruzioni += 1
+                    if not self._riprova or interruzioni >= self.tentativi:
+                        self._riprova = False
+                        raise
+                    attesa = self.attesa_secondi * 3 ** (interruzioni - 1)
+                    log.warning("Argo: %s, nuovo tentativo tra %d s (%d/%d)", descrivi_errore(e), attesa,
+                                interruzioni + 1, self.tentativi)
+                    await asyncio.sleep(attesa)
+                    continue
+                if not str(e.message or "").startswith("Login SSO fallito"):
+                    raise
+                rifiuti += 1
+                avviso = self._maschera(_SSO["avviso"])
+                if rifiuti == 2:
+                    if avviso:
+                        e.message = f"{e.message} (Argo: {avviso})"
+                    raise
+                log.warning("Argo: login SSO rifiutato (%s), nuovo tentativo tra %d s",
+                            avviso or "nessun dettaglio", self.attesa_login)
+                await asyncio.sleep(self.attesa_login)
 
     async def _request(self, method: str, path: str, **kwargs):
         prova = 1
@@ -495,6 +695,8 @@ class Notifica:
     title: str
     message: str
     url: str | None = None   # aperto toccando la notifica (es. allegato su Drive/Nextcloud)
+    giorno: date | None = None  # data dell'elemento (usata per il passaggio alle nuove chiavi dei voti)
+    completo: str | None = None  # testo intero per Telegram (HA riceve il riassunto in message)
 
 
 @dataclass
@@ -650,8 +852,25 @@ def chiave_bacheca(b) -> str:
     return h("bacheca", b.dat_evento, b.data, b.autore, b.messaggio[:200])
 
 
+def chiave_voto(v) -> str:
+    """prgVoto da solo NON è univoco (è un progressivo che si ripete tra materie e giorni): con
+    materia e giorno sì. Senza prgVoto si usa il contenuto del voto."""
+    if v.prg_voto is not None:
+        return h("voto2", v.pk_materia, (v.dat_giorno or "")[:10], v.prg_voto)
+    return h("voto2", v.pk_materia, (v.dat_giorno or "")[:10], v.cod_codice, v.descrizione_prova)
+
+
+MIGRAZIONE_VOTI = "chiavi-voti-2"   # in seen[...]["_migrazioni"]
+GIORNI_RECUPERO_VOTI = 10           # al passaggio, voti di questi ultimi giorni notificati (forse persi)
+
+
 def chiave_allegato(b, a) -> str:
     return h("allegato", chiave_bacheca(b), a.nome_file)
+
+
+def chiave_comunicazione(b) -> str:
+    """Il PDF generato per una comunicazione senza allegati."""
+    return h("comunicazione", chiave_bacheca(b))
 
 
 def note_disciplinari(d, raw: dict | None) -> list[dict]:
@@ -674,6 +893,44 @@ def note_disciplinari(d, raw: dict | None) -> list[dict]:
 
 
 TIPI_APPELLO = {"A": "Assenza", "I": "Ingresso posticipato", "U": "Uscita anticipata"}
+
+
+def _num(x) -> float | None:
+    try:
+        return float(x) if x is not None and not isinstance(x, bool) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def media_materia(d, raw: dict | None, pk_materia: str) -> float | None:
+    """Media della materia come la calcola Argo (mediaMaterie: somme e numero delle valutazioni,
+    scritto + orale + pratico); se manca, media dei voti numerici che fanno media."""
+    e = ((raw or {}).get("mediaMaterie") or {}).get(pk_materia) or {}
+    for k in ("mediaMateria", "media"):
+        if (m := _num(e.get(k))) is not None:
+            return m
+    somma = sum(_num(e.get(f"sommaValutazioni{t}")) or 0 for t in ("Scritto", "Orale", "Pratico"))
+    numero = sum(_num(e.get(f"numValutazioni{t}")) or 0 for t in ("Scritto", "Orale", "Pratico"))
+    if numero:
+        return somma / numero
+    valori = [v.valore for v in d.voti if v.pk_materia == pk_materia and v.valore is not None
+              and not v.fa_meno_media]
+    return sum(valori) / len(valori) if valori else None
+
+
+def media_generale(d) -> float | None:
+    """mediaGenerale di Argo; se manca, media dei voti numerici che fanno media."""
+    if (m := _num(getattr(d, "media_generale", None))) is not None and m > 0:
+        return m
+    valori = [v.valore for v in d.voti if v.valore is not None and not v.fa_meno_media]
+    return sum(valori) / len(valori) if valori else None
+
+
+def fmt_media(x: float | None) -> str:
+    """Arrotondata al quarto di voto più vicino (7,25 · 7,50 · 7,75 · 8,00), metà per eccesso."""
+    if x is None:
+        return "–"
+    return f"{int(x * 4 + 0.5) / 4:.2f}".replace(".", ",")
 
 
 def build_snapshot(d, orario: dict[date, list[dict]], nome: str, cfg: dict,
@@ -726,18 +983,20 @@ def build_snapshot(d, orario: dict[date, list[dict]], nome: str, cfg: dict,
     for b in d.bacheca:
         key = chiave_bacheca(b)
         links = [link_allegati.get(chiave_allegato(b, a)) for a in b.lista_allegati]
+        link_pdf = None if b.lista_allegati else link_allegati.get(chiave_comunicazione(b))
         extra = []
         if b.pv_richiesta and not b.is_presa_visione:
             extra.append("presa visione richiesta")
         if b.ad_richiesta and not b.is_presa_adesione_confermata:
             extra.append("adesione richiesta")
         suffix = f" [{', '.join(extra)}]" if extra else ""
-        primo = next((x for x in links if x), None)
+        primo = next((x for x in links if x), None) or link_pdf
         n_all = len(b.lista_allegati)
         txt_all = f" 📎 {n_all} allegat{'o' if n_all == 1 else 'i'}" if n_all else ""
         snap.notifiche.append(Notifica(key, "bacheca", f"📢 Bacheca – {nome}",
                                        f"{b.autore}: {short(b.messaggio, 300)}{suffix}{txt_all}",
-                                       url=primo))
+                                       url=primo,
+                                       completo=f"{b.autore}{suffix}{txt_all}\n\n{testo_semplice(b.messaggio)}"))
         # Solo la scadenza di adesione: dataScadenza è la fine pubblicazione della circolare
         # (spesso fine anno scolastico), non una scadenza per la famiglia.
         scad = parse_date(b.data_scad_adesione)
@@ -747,18 +1006,25 @@ def build_snapshot(d, orario: dict[date, list[dict]], nome: str, cfg: dict,
             snap.cal.append(CalItem(
                 key=key, kind="scadenza", summary=f"📢 Scadenza: {short(b.messaggio, 60)}",
                 description=f"{b.messaggio}\n\nDa: {b.autore}{suffix}"
-                            + (f"\n\nAllegati:\n{allegati}" if allegati else ""),
+                            + (f"\n\nAllegati:\n{allegati}" if allegati else "")
+                            + (f"\n\nComunicazione in PDF: {link_pdf}" if link_pdf else ""),
                 day=scad, color="11"))
 
     # Solo notifiche
+    m_gen = media_generale(d) if d.voti else None
     for v in d.voti:
-        key = h("voto", v.prg_voto) if v.prg_voto is not None else \
-            h("voto", v.dat_giorno, v.pk_materia, v.cod_codice, v.descrizione_prova)
+        key = chiave_voto(v)
         tipo = "scritto" if v.is_scritto else "orale" if v.is_orale else (v.tipo_valutazione or "")
         dettagli = " – ".join(x for x in (v.descrizione_prova, v.des_commento) if x)
+        m_mat = media_materia(d, raw, v.pk_materia)
+        medie = " · ".join(x for x in (
+            f"media {v.des_materia.lower()}: {fmt_media(m_mat)}" if m_mat is not None else "",
+            f"media generale: {fmt_media(m_gen)}" if m_gen is not None else "") if x)
         snap.notifiche.append(Notifica(key, "voti", f"🎓 Voto – {nome}",
                                        f"{v.des_materia}: {v.cod_codice or v.valore} {tipo}"
-                                       f" ({v.dat_giorno[:10]})" + (f"\n{dettagli}" if dettagli else "")))
+                                       f" ({v.dat_giorno[:10]})" + (f"\n{dettagli}" if dettagli else "")
+                                       + (f"\n📊 {medie}" if medie else ""),
+                                       giorno=parse_date(v.dat_giorno)))
     for n in note_disciplinari(d, raw):
         key = h("nota", n["data"], n["ora"], n["docente"], n["testo"])
         quando = n["data"] + (f" {n['ora']}" if n["ora"] else "")
@@ -951,6 +1217,113 @@ def percorso_allegato(acfg: dict, b, a) -> tuple[list[str], str]:
     except KeyError:
         nome = v["nome"]
     return cartelle, nome_file_sicuro(nome)
+
+
+# --------------------------------------------------------------------------- #
+# Comunicazioni senza allegati → PDF (solo libreria standard)                 #
+# --------------------------------------------------------------------------- #
+def testo_semplice(s: str) -> str:
+    """Messaggio della bacheca come testo: niente tag HTML, entità decodificate, a capo conservati."""
+    s = re.sub(r"(?i)<br\s*/?>|</tr>", "\n", s or "")
+    s = re.sub(r"(?i)</(p|div|h\d)>", "\n\n", s)
+    s = re.sub(r"(?i)<li[^>]*>", "\n- ", s)
+    s = unescape(re.sub(r"<[^>]+>", "", s)).replace("\r\n", "\n").replace("\r", "\n").replace("\xa0", " ")
+    righe = [" ".join(r.split()) for r in s.split("\n")]
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(righe)).strip()
+
+
+def nome_pdf_comunicazione(b) -> str:
+    """Nome del PDF: l'inizio della comunicazione, senza "Oggetto:" (es. "uscita didattica….pdf")."""
+    testo = testo_semplice(b.messaggio)
+    prima = next((r for r in testo.split("\n") if r.strip()), "")
+    prima = re.sub(r"(?i)^oggetto\s*[:.\-]\s*", "", prima) or b.categoria or "Comunicazione"
+    prima = prima if len(prima) <= 70 else prima[:70].rsplit(" ", 1)[0]
+    return f"{prima.rstrip(' .:;,')}.pdf"
+
+
+def _pdf_stringa(t: str) -> bytes:
+    b = t.encode("cp1252", "replace")
+    b = bytes(c if c >= 32 or c == 9 else 32 for c in b)
+    return b"(" + b.replace(b"\\", b"\\\\").replace(b"(", b"\\(").replace(b")", b"\\)") + b")"
+
+
+def pdf_testo(titolo: str, intestazione: list[str], corpo: str, piede: str = "") -> bytes:
+    """PDF A4 minimale con i font standard Courier (larghezza fissa: a capo esatti).
+    Caratteri fuori da Windows-1252 (es. emoji) diventano "?"."""
+    W, H, M = 595, 842, 56
+    righe: list[tuple[str, int, str]] = []  # (font, corpo in pt, testo)
+
+    def aggiungi(testo: str, font: str, pt: int):
+        colonne = int((W - 2 * M) / (pt * 0.6))
+        for par in testo.split("\n"):
+            for r in textwrap.wrap(par, colonne, break_long_words=True, break_on_hyphens=False) or [""]:
+                righe.append((font, pt, r))
+    aggiungi(titolo, "F2", 14)
+    righe.append(("F1", 6, ""))
+    for r in intestazione:
+        aggiungi(r, "F2" if r.endswith(":") else "F1", 10)
+    righe.append(("F1", 10, ""))
+    aggiungi(corpo, "F1", 10)
+
+    pagine: list[list[bytes]] = [[]]
+    y = H - M
+    for font, pt, testo in righe:
+        passo = pt * 1.35
+        if y - passo < M + 20 and pagine[-1]:
+            pagine.append([])
+            y = H - M
+        y -= passo
+        if testo:
+            pagine[-1].append(b"BT /%s %d Tf %d %.1f Td %s Tj ET" % (font.encode(), pt, M, y, _pdf_stringa(testo)))
+    n = len(pagine)
+    oggetti: list[bytes] = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"",  # Pages, sotto
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>",
+        b"<< /Title %s /Producer (didup-calendar-sync) >>" % _pdf_stringa(titolo),
+    ]
+    kids = []
+    for i, contenuto in enumerate(pagine, 1):
+        pie = f"{piede} - pagina {i}/{n}" if piede else f"pagina {i}/{n}"
+        contenuto = contenuto + [b"BT /F1 8 Tf %d %d Td %s Tj ET" % (M, M - 16, _pdf_stringa(pie))]
+        flusso = b"\n".join(contenuto)
+        oggetti.append(b"<< /Length %d >>\nstream\n%s\nendstream" % (len(flusso), flusso))
+        oggetti.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Contents %d 0 R "
+                       b"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> >>" % (W, H, len(oggetti)))
+        kids.append(b"%d 0 R" % len(oggetti))
+    oggetti[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (b" ".join(kids), n)
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    posizioni = []
+    for i, o in enumerate(oggetti, 1):
+        posizioni.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (i, o)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(oggetti) + 1)
+    out += b"".join(b"%010d 00000 n \n" % p for p in posizioni)
+    out += b"trailer\n<< /Size %d /Root 1 0 R /Info 5 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(oggetti) + 1, xref)
+    return bytes(out)
+
+
+def pdf_comunicazione(b, alunno: str) -> bytes:
+    giorno = parse_date(b.data) or parse_date(b.dat_evento)
+    testa = [f"Alunno: {alunno}"]
+    if giorno:
+        testa.append(f"Data: {giorno:%d/%m/%Y}")
+    if b.autore:
+        testa.append(f"Da: {b.autore}")
+    if b.categoria:
+        testa.append(f"Categoria: {b.categoria}")
+    if b.pv_richiesta:
+        testa.append("Presa visione: " + ("data" if b.is_presa_visione else "richiesta (da dare sul registro)"))
+    if b.ad_richiesta:
+        scad = parse_date(b.data_scad_adesione)
+        testa.append("Adesione: " + ("confermata" if b.is_presa_adesione_confermata else "richiesta")
+                     + (f", entro il {scad:%d/%m/%Y}" if scad else ""))
+    if b.url:
+        testa.append(f"Link: {b.url}")
+    return pdf_testo("Comunicazione dalla bacheca Argo", testa, testo_semplice(b.messaggio) or "(testo vuoto)",
+                     f"generato da didup-calendar-sync il {date.today():%d/%m/%Y}")
 
 
 class Drive:
@@ -1153,9 +1526,16 @@ async def archivia_allegati(cli: "MultiProfiloClient", d, nome: str, acfg: dict,
         return k not in arch or (tipo_link is not None and arch[k].get("tipo", "interno") != tipo_link)
     da_fare = [(b, a, chiave_allegato(b, a)) for b in d.bacheca for a in b.lista_allegati
                if a.pk and da_rifare(chiave_allegato(b, a))]
+    if acfg["allegati"].get("comunicazioni_pdf", True):  # senza allegati: la comunicazione in PDF
+        da_fare += [(b, None, chiave_comunicazione(b)) for b in d.bacheca
+                    if not b.lista_allegati and da_rifare(chiave_comunicazione(b))]
+    n_pdf = sum(a is None for _, a, _ in da_fare)
     massimo = acfg["allegati"]["max_per_giro"]
     caricati = ricollegati = errori = 0
     for b, a, k in da_fare[:massimo]:
+        pdf = a is None
+        if pdf:
+            a = SimpleNamespace(nome_file=nome_pdf_comunicazione(b), pk=None)
         try:
             percorso, nome_drive = percorso_allegato(acfg, b, a)
             if drive.dry and k in arch:
@@ -1169,7 +1549,10 @@ async def archivia_allegati(cli: "MultiProfiloClient", d, nome: str, acfg: dict,
                 log.debug("[%s] + allegato %s/%s", nome, "/".join(percorso), nome_drive)
                 continue
             cartella = drive.cartella(percorso)
-            dati, mime = await scarica(await cli.url_allegato(a.pk, d.pk))
+            if pdf:
+                dati, mime = pdf_comunicazione(b, nome), "application/pdf"
+            else:
+                dati, mime = await scarica(await cli.url_allegato(a.pk, d.pk))
             arch[k] = drive.carica(cartella, nome_drive, dati, mime, k)
             caricati += 1
         except Exception as e:  # noqa: BLE001 - un allegato non deve fermare la sync
@@ -1179,9 +1562,10 @@ async def archivia_allegati(cli: "MultiProfiloClient", d, nome: str, acfg: dict,
         METRICHE.inc("didup_attachments_total", caricati, alunno=nome, archivio=tipo or "drive", esito="caricato")
         METRICHE.inc("didup_attachments_total", errori, alunno=nome, archivio=tipo or "drive", esito="errore")
     if da_fare:
-        log.info("[%s] allegati: %d da archiviare, %d caricati su %s, %d link aggiornati, %d errori, "
-                 "%d al prossimo giro", nome, len(da_fare), caricati, getattr(drive, "nome", "archivio"),
-                 ricollegati, errori, max(0, len(da_fare) - massimo))
+        log.info("[%s] allegati: %d da archiviare%s, %d caricati su %s, %d link aggiornati, %d errori, "
+                 "%d al prossimo giro", nome, len(da_fare),
+                 f" (di cui {n_pdf} comunicazioni in PDF)" if n_pdf else "", caricati,
+                 getattr(drive, "nome", "archivio"), ricollegati, errori, max(0, len(da_fare) - massimo))
     return {k: v["link"] for k, v in arch.items()}
 
 
@@ -1202,10 +1586,24 @@ class Notifier:
         """Chat Telegram che ricevono questa notifica."""
         return filtra_destinatari(self.chat_tg, "chat_id", kind, alunno) if self.tg else []
 
-    @staticmethod
-    def testo_telegram(title: str, message: str, url: str | None) -> str:
-        testo = f"{title}\n{message}" + (f"\n{url}" if url else "")
-        return testo if len(testo) <= 4000 else testo[:3990] + "…"
+    MAX_TELEGRAM = 4000  # limite di Telegram: 4096 caratteri per messaggio
+
+    @classmethod
+    def testi_telegram(cls, title: str, message: str, url: str | None) -> list[str]:
+        """Il testo intero, diviso in più messaggi (ai paragrafi, poi alle righe e alle parole)
+        se supera il limite di Telegram. Il link va in fondo all'ultimo."""
+        testo = f"{title}\n{message}" + (f"\n\n{url}" if url and "\n\n" in message else f"\n{url}" if url else "")
+        if len(testo) <= cls.MAX_TELEGRAM:
+            return [testo]
+        n = cls.MAX_TELEGRAM - 12   # spazio per " (2/3)"
+        parti, resto = [], testo
+        while len(resto) > n:
+            taglio = max(resto.rfind(sep, 0, n) for sep in ("\n\n", "\n", " "))
+            taglio = taglio if taglio > n // 2 else n
+            parti.append(resto[:taglio].rstrip())
+            resto = resto[taglio:].lstrip()
+        parti.append(resto)
+        return [f"{p} ({i}/{len(parti)})" for i, p in enumerate(parti, 1)]
 
     @staticmethod
     def payload_ha(title: str, message: str, url: str | None) -> dict:
@@ -1216,7 +1614,8 @@ class Notifier:
         return p
 
     def send(self, title: str, message: str, url: str | None = None,
-             kind: str | None = None, alunno: str | None = None) -> None:
+             kind: str | None = None, alunno: str | None = None, completo: str | None = None) -> None:
+        """``completo``: testo intero per Telegram (Home Assistant riceve ``message``, più corto)."""
         servizi, chat = self.servizi(kind, alunno), self.chat(kind, alunno)
         a_chi = ", ".join([f"notify.{s}" for s in servizi] + [chat_mascherata(c) for c in chat]) or "nessuno"
         if self.dry:
@@ -1234,16 +1633,18 @@ class Notifier:
                 except httpx.HTTPError as e:
                     log.error("Notifica HA fallita (notify.%s): %s", servizio, e)
                     METRICHE.inc("didup_notification_errors_total", servizio=f"notify.{servizio}")
+            testi = self.testi_telegram(title, completo or message, url) if chat else []
             for chat_id in chat:
                 try:
-                    r = c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
-                               json={"chat_id": chat_id, "text": self.testo_telegram(title, message, url)})
-                    if r.status_code >= 400:
-                        try:
-                            motivo = r.json().get("description", "")
-                        except ValueError:
-                            motivo = ""
-                        raise RuntimeError(f"HTTP {r.status_code} {motivo}".strip())
+                    for testo in testi:
+                        r = c.post(f"https://api.telegram.org/bot{self.tg['bot_token']}/sendMessage",
+                                   json={"chat_id": chat_id, "text": testo})
+                        if r.status_code >= 400:
+                            try:
+                                motivo = r.json().get("description", "")
+                            except ValueError:
+                                motivo = ""
+                            raise RuntimeError(f"HTTP {r.status_code} {motivo}".strip())
                 except (httpx.HTTPError, RuntimeError) as e:
                     # mai l'eccezione di httpx così com'è: l'URL contiene il token del bot
                     errore = str(e) if isinstance(e, RuntimeError) else type(e).__name__
@@ -1409,6 +1810,15 @@ def notify_new(snap: Snapshot, who: str, nome: str, state: State, notifier, tipi
     current: dict[str, list[str]] = {}
     for n in snap.notifiche:
         current.setdefault(n.kind, []).append(n.key)
+    if prev is not None and MIGRAZIONE_VOTI not in prev.get("_migrazioni", []):
+        # Nuove chiavi dei voti: quelli vecchi diventano "visti" senza notifica, tranne gli ultimi
+        # giorni, che con le chiavi vecchie potrebbero essere stati scambiati per voti già visti.
+        limite = date.today() - timedelta(days=GIORNI_RECUPERO_VOTI)
+        voti = [n for n in snap.notifiche if n.kind == "voti"]
+        vecchi = [n.key for n in voti if not n.giorno or n.giorno < limite]
+        prev = {**prev, "voti": sorted(set(prev.get("voti", [])) | set(vecchi))}
+        log.info("[%s] nuove chiavi dei voti: %d voti memorizzati senza notifica, %d degli ultimi %d giorni "
+                 "ricontrollati", nome, len(vecchi), len(voti) - len(vecchi), GIORNI_RECUPERO_VOTI)
     if prev is None:
         log.info("[%s] primo avvio: memorizzo %d elementi senza notificare", nome, len(snap.notifiche))
     else:
@@ -1418,12 +1828,15 @@ def notify_new(snap: Snapshot, who: str, nome: str, state: State, notifier, tipi
                 by_kind.setdefault(n.kind, []).append(n)
         for kind, nuove in by_kind.items():
             for n in nuove[:MAX_PER_TIPO]:
-                notifier.send(n.title, n.message, url=n.url, kind=kind, alunno=nome)
+                notifier.send(n.title, n.message, url=n.url, kind=kind, alunno=nome,
+                              **({"completo": n.completo} if n.completo else {}))
             if len(nuove) > MAX_PER_TIPO:
                 notifier.send(f"Argo – {nome}", f"…e altri {len(nuove) - MAX_PER_TIPO} elementi ({kind})",
                               kind=kind, alunno=nome)
     state.data["seen"][who] = {k: sorted(set(current.get(k, [])) | set((prev or {}).get(k, [])))
                                for k in set(current) | set(prev or {})}
+    state.data["seen"][who]["_migrazioni"] = sorted(set(state.data["seen"][who].get("_migrazioni", []))
+                                                    | {MIGRAZIONE_VOTI})
 
 
 # --------------------------------------------------------------------------- #
@@ -1538,10 +1951,7 @@ async def run_once(cfg: dict, args, state: State, notifier: Notifier) -> None:
                 for al in als:
                     await sync_alunno(cli, al, cal, state, notifier, oggi, archivio(al))
         except Exception as e:  # noqa: BLE001
-            if errore_temporaneo(e):   # Argo giù o rete: una riga, senza traceback
-                log.error("[%s] sync fallita, Argo non raggiungibile: %s", acc["codice_scuola"], descrivi_errore(e))
-            else:
-                log.exception("[%s] sync fallita", acc["codice_scuola"])
+            registra_errore_account(acc["codice_scuola"], e)
             errori.append(f"{acc['codice_scuola']}: {descrivi_errore(e)}")
     if errori:
         raise SyncFallita("; ".join(errori))

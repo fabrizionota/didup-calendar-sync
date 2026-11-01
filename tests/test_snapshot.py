@@ -378,7 +378,7 @@ class FakeNotifier:
     def __init__(self):
         self.sent = []
 
-    def send(self, title, message, url=None, kind=None, alunno=None):
+    def send(self, title, message, url=None, kind=None, alunno=None, **kw):
         self.sent.append((title, message))
         self.urls = getattr(self, "urls", []) + [url]
 

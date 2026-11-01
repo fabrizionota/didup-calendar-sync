@@ -36,6 +36,40 @@ class TestErrori(unittest.TestCase):
         self.assertNotIn("x=1", m.descrivi_errore(err(503)))
 
 
+class TestLogAccount(unittest.TestCase):
+    def registra(self, e):
+        try:
+            raise e
+        except Exception as x:  # noqa: BLE001
+            with self.assertLogs(m.log, logging.DEBUG) as lg:
+                m.registra_errore_account("SC1", x)
+        return lg.records
+
+    def test_login_fallito_in_una_riga(self):
+        e = m.AuthError("Login SSO fallito: credenziali errate o flusso cambiato", status_code=200)
+        self.assertEqual(m.descrivi_errore(e), "login Argo fallito: Login SSO fallito: credenziali errate o flusso cambiato")
+        self.assertFalse(m.errore_temporaneo(e))           # niente retry: rischio blocco account
+        err, dbg = self.registra(e)
+        self.assertEqual(err.levelno, logging.ERROR)
+        self.assertIsNone(err.exc_info)
+        self.assertIn("[SC1] sync fallita, login Argo fallito: Login SSO fallito", err.getMessage())
+        self.assertNotIn("HTTP 200", err.getMessage())
+        self.assertIn("app Argo Famiglia", err.getMessage())
+        self.assertEqual(dbg.levelno, logging.DEBUG)       # traceback solo con -v
+        self.assertIsNotNone(dbg.exc_info)
+
+    def test_argo_giu_in_una_riga(self):
+        err, dbg = self.registra(m.DiDUPError(PAGINA_500, status_code=503, request_url="https://x/login"))
+        self.assertEqual(err.getMessage(), "[SC1] sync fallita, Argo non raggiungibile: HTTP 503 su login")
+        self.assertIsNone(err.exc_info)
+        self.assertIsNotNone(dbg.exc_info)
+
+    def test_errore_inatteso_con_traceback(self):
+        (err,) = self.registra(KeyError("boh"))
+        self.assertEqual(err.getMessage(), "[SC1] sync fallita")
+        self.assertIsNotNone(err.exc_info)
+
+
 class FintoClient(m.MultiProfiloClient):
     def __init__(self, risposte, tentativi=3, attesa=30):  # niente login, niente rete
         self.risposte, self.chiamate = list(risposte), 0
